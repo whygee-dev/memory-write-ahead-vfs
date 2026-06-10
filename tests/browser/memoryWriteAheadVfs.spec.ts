@@ -4,6 +4,7 @@ const browserFixtureNames = [
     'runAbandonedFileLockWorkerRecovery',
     'runAbandonedWorkerLeaseRecovery',
     'runCapacityExceededFailure',
+    'runDuplicatePendingOpenRejection',
     'runFileLockRegression',
     'runMultipleRuntimeIsolation',
     'runOwnerLeaseClaimRecovery',
@@ -195,6 +196,17 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
         const result = await runBrowserFixture(page, 'runSameVfsSequentialReopen');
 
         expect(result.rows).toEqual(['first-open', 'second-open']);
+    });
+
+    test('rejects a duplicate primary open while the first open is still pending', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runDuplicatePendingOpenRejection');
+
+        expect(result.firstOpen).toBe(5); // SQLITE_BUSY: first open queues #retryOpen
+        expect(result.duplicateOpen).toBe(14); // SQLITE_CANTOPEN: rejected before allocating handles
+        expect(result.duplicateOpenError).toContain('separate MemoryWriteAheadVFS instance');
+        expect(result.retriedFirstOpen).toBe(0); // SQLITE_OK
+        expect(result.closedFirstOpen).toBe(0); // SQLITE_OK
+        expect(result.openHandleCount).toBe(0);
     });
 
     test('runs the README quickstart fixture in a browser', async ({ page }) => {

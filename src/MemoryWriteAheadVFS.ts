@@ -412,7 +412,12 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
 
             if (flags & VFS.SQLITE_OPEN_MAIN_DB) {
                 const existingFile = this.mapPathToFile.get(normalizedName);
-                if (existingFile?.opened && this.mapIdToFile.get(fileId) !== existingFile) {
+                // retryResult === null on an unopened existing file means the first open's #retryOpen is
+                // still in flight; wa-sqlite only retries after that op settles, so another open arriving
+                // now is a duplicate. Queueing a second #retryOpen on the same file would race the handle
+                // assignment and leak whichever handle set loses.
+                const isOpenedOrOpening = existingFile && (existingFile.opened || existingFile.retryResult === null);
+                if (isOpenedOrOpening && this.mapIdToFile.get(fileId) !== existingFile) {
                     throw new Error(
                         `Open a separate MemoryWriteAheadVFS instance for each SQLite connection to ${normalizedName}`
                     );

@@ -1,5 +1,6 @@
 import * as SQLite from '@journeyapps/wa-sqlite';
 import waSqliteModuleFactory from '@journeyapps/wa-sqlite/dist/wa-sqlite.mjs';
+import * as VFS from '@journeyapps/wa-sqlite/src/VFS.js';
 
 import {
     MEMORY_WRITE_AHEAD_VFS,
@@ -742,6 +743,45 @@ export const runSameVfsSequentialReopen = async () => {
         }
     } finally {
         await waitForOpenHandleCount(dbFilename, 0).catch(() => undefined);
+        resetRuntime(dbFilename);
+    }
+};
+
+export const runDuplicatePendingOpenRejection = async () => {
+    ensureCrossOriginIsolated();
+
+    const dbFilename = nextDbFilename('duplicate-pending-open');
+    const runtime = createMemoryWriteAheadSharedRuntime(dbFilename, {
+        initialDatabaseCapacityBytes: 64 * 1024,
+        maxDatabaseCapacityBytes: 2 * 1024 * 1024,
+        initialWriteAheadCapacityBytes: 16 * 1024,
+        maxWriteAheadCapacityBytes: 2 * 1024 * 1024,
+    });
+
+    try {
+        // Drives jOpen directly: hitting the pending window through sqlite3_open would need two
+        // connections racing into one VFS instance mid-#retryOpen, which wa-sqlite cannot schedule.
+        const module = { retryOps: [] as Promise<unknown>[] };
+        const vfs = new MemoryWriteAheadVFS(MEMORY_WRITE_AHEAD_VFS, module, runtime);
+        const openFlags = VFS.SQLITE_OPEN_MAIN_DB | VFS.SQLITE_OPEN_CREATE | VFS.SQLITE_OPEN_READWRITE;
+        const pOutFlags = new DataView(new ArrayBuffer(4));
+
+        const firstOpen = vfs.jOpen(dbFilename, 1, openFlags, pOutFlags);
+        const duplicateOpen = vfs.jOpen(dbFilename, 2, openFlags, pOutFlags);
+        const duplicateOpenError = vfs.lastError?.message ?? null;
+        await Promise.all(module.retryOps);
+        const retriedFirstOpen = vfs.jOpen(dbFilename, 1, openFlags, pOutFlags);
+        const closedFirstOpen = vfs.jClose(1);
+
+        return {
+            firstOpen,
+            duplicateOpen,
+            duplicateOpenError,
+            retriedFirstOpen,
+            closedFirstOpen,
+            openHandleCount: diagnosticsFor(dbFilename).openHandleCount,
+        };
+    } finally {
         resetRuntime(dbFilename);
     }
 };
