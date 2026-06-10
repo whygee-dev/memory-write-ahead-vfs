@@ -1,6 +1,6 @@
 {
   "name": "memory-write-ahead-vfs",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "SharedArrayBuffer-backed in-memory write-ahead VFS for wa-sqlite.",
   "type": "module",
   "license": "MIT",
