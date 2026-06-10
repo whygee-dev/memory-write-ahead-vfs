@@ -1,0 +1,63 @@
+{
+  "name": "memory-write-ahead-vfs",
+  "version": "0.1.0",
+  "description": "SharedArrayBuffer-backed in-memory write-ahead VFS for wa-sqlite.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Yahya JIRARI",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whygee-dev/memory-write-ahead-vfs.git"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/prepare-dist.mjs",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "playwright test",
+    "test:browser": "playwright test",
+    "test:stress": "playwright test --repeat-each=20 --workers=1",
+    "prepack": "pnpm build",
+    "prepublishOnly": "pnpm format:check && pnpm check && pnpm test:browser && pnpm build"
+  },
+  "keywords": [
+    "sqlite",
+    "wa-sqlite",
+    "vfs",
+    "write-ahead",
+    "sharedarraybuffer",
+    "browser"
+  ],
+  "peerDependencies": {
+    "@journeyapps/wa-sqlite": ">=1.7.0"
+  },
+  "devDependencies": {
+    "@journeyapps/wa-sqlite": "^1.7.0",
+    "@playwright/test": "^1.51.1",
+    "@types/node": "^20.19.0",
+    "prettier": "^3.8.4",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.1"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "packageManager": "pnpm@10.27.0"
+}
