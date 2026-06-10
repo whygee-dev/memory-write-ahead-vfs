@@ -6,6 +6,26 @@ It provides one shared, named, in-memory SQLite runtime that can be structured-c
 
 Originally developed for internal use at Beeldi; this standalone package contains only the generic VFS.
 
+## Motivation
+
+wa-sqlite's in-memory VFS examples store their bytes in one JavaScript context: a database created in one worker is invisible to every other worker. The common workarounds are to proxy every statement through a single owner worker over `postMessage` (serializing each query and result, and funneling all work through one thread) or to switch to persistent storage such as OPFS or IndexedDB (paying real file I/O and exclusive access-handle coordination for data that never needed to outlive the page).
+
+This library targets the gap between those options: an ephemeral SQLite database that several dedicated workers read and write concurrently at memory speed — caches, scratch stores, staging areas, and query workspaces.
+
+### Why SharedArrayBuffer
+
+- `SharedArrayBuffer` is the only browser primitive that lets multiple workers map the same memory. Structured-cloning the runtime shares the underlying bytes instead of copying them, so every worker runs its own SQLite WASM instance directly against a single copy of the database.
+- SQLite's VFS interface is synchronous, so cross-worker coordination cannot `await`. `Atomics` over shared memory provide the compare-and-swap file locks and — in dedicated workers — the blocking `Atomics.wait` the lock protocol needs. This is also why contended locks require dedicated workers and why cross-origin isolation is a hard requirement.
+- Each query is a plain synchronous WASM call against shared bytes: no per-statement message round-trip, no result serialization, no single-owner bottleneck.
+
+### Why growable SharedArrayBuffer
+
+A plain `SharedArrayBuffer` is fixed-size at construction, which forces a bad choice for a database with a large ceiling: either commit the maximum capacity up front (hundreds of MiB for a mostly-small database), or re-allocate bigger buffers as data grows and re-broadcast the new handles to every worker mid-flight, copying bytes and re-coordinating every open connection.
+
+`SharedArrayBuffer.prototype.grow` removes that dilemma. Buffers start at the initial capacity and grow in place up to `maxByteLength`, and every worker that already holds the runtime observes the new length immediately — no re-sharing, no copies. Files are split into segments so each buffer's reservation stays bounded, and write-ahead segments past the logical end drop out of the active set after `PRAGMA wal_checkpoint(TRUNCATE)` (tracked in diagnostics; the underlying allocation is not returned to the OS, since shared buffers cannot shrink).
+
+On engines without growable `SharedArrayBuffer`, `allowFixedCapacityFallback: true` restores the fixed-size strategy at the cost of allocating each file's max capacity immediately.
+
 ## Runtime requirements
 
 - Browser context with `SharedArrayBuffer` and growable `SharedArrayBuffer` support.
