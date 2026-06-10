@@ -269,18 +269,21 @@ const countActiveOwnerLeases = (runtime: MemoryWriteAheadSharedRuntime) => {
     );
 };
 
+// ownerId is cleared first so a clear interrupted by worker death strands the slot with ownerId 0 and a stale
+// heartbeat — the one orphaned shape claimOwnerLeaseSlot knows how to reclaim. Clearing heartbeat first would
+// instead strand ownerId > 0 with no heartbeat, which neither recovery nor claiming can ever release.
 const clearOwnerLeaseSlot = (runtimeMeta: Int32Array, slotIndex: number) => {
-    Atomics.store(
-        runtimeMeta,
-        getRuntimeOwnerLeaseIndex(slotIndex, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.heartbeatMs),
-        0
-    );
+    Atomics.store(runtimeMeta, getRuntimeOwnerLeaseIndex(slotIndex, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.ownerId), 0);
     Atomics.store(
         runtimeMeta,
         getRuntimeOwnerLeaseIndex(slotIndex, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.handleCount),
         0
     );
-    Atomics.store(runtimeMeta, getRuntimeOwnerLeaseIndex(slotIndex, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.ownerId), 0);
+    Atomics.store(
+        runtimeMeta,
+        getRuntimeOwnerLeaseIndex(slotIndex, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.heartbeatMs),
+        0
+    );
 };
 
 const updateOwnerLeaseHeartbeat = (runtime: MemoryWriteAheadSharedRuntime, lease: LocalRuntimeLease) => {
@@ -373,23 +376,36 @@ const recoverAbandonedRuntimeOwnerLeases = (
     return recoveredHandleCount;
 };
 
-const claimOwnerLeaseSlot = (runtimeMeta: Int32Array, ownerId: number) =>
+const claimOwnerLeaseSlot = (runtimeMeta: Int32Array, ownerId: number, staleMs: number) =>
     Array.from({ length: MEMORY_WRITE_AHEAD_OWNER_LEASE_SLOT_COUNT }, (_, slotIndex) => slotIndex).find((slotIndex) => {
         const ownerIdIndex = getRuntimeOwnerLeaseIndex(slotIndex, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.ownerId);
         const handleCountIndex = getRuntimeOwnerLeaseIndex(slotIndex, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.handleCount);
         const heartbeatIndex = getRuntimeOwnerLeaseIndex(slotIndex, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.heartbeatMs);
 
-        // A racing clear can make a free slot look busy for one scan; with 32 slots we prefer skipping it
-        // transiently over claiming a partially-cleared lease.
+        // A release interrupted mid-clear (clearOwnerLeaseSlot zeroes ownerId first) can strand a slot with
+        // ownerId 0 but leftover handleCount/heartbeat; recovery ignores ownerless slots, so reclaim it here.
+        // A stale heartbeat is the orphan marker: fresh leftovers (a racing clear or a zombie owner's late
+        // heartbeat write) are skipped rather than disturbed, and with 32 slots a transient skip is cheap.
+        const leftoverHeartbeatAgeMs = getMemoryWriteAheadLockAgeMs(Atomics.load(runtimeMeta, heartbeatIndex));
+        const isStaleLeftover = leftoverHeartbeatAgeMs !== null && leftoverHeartbeatAgeMs > staleMs;
+
         if (
-            Atomics.load(runtimeMeta, handleCountIndex) !== 0 ||
-            Atomics.load(runtimeMeta, heartbeatIndex) !== 0 ||
-            Atomics.compareExchange(runtimeMeta, ownerIdIndex, 0, ownerId) !== 0
+            (Atomics.load(runtimeMeta, handleCountIndex) !== 0 || Atomics.load(runtimeMeta, heartbeatIndex) !== 0) &&
+            !isStaleLeftover
         ) {
             return false;
         }
 
+        // The heartbeat is published before the CAS so the slot is never visible as "owned with a stale
+        // heartbeat": recovery cannot steal a slot mid-claim, and death right after the CAS leaves a fresh
+        // heartbeat that ages into normal recovery instead of an unrecoverable shape. If the CAS loses, the
+        // leftover fresh heartbeat just defers this slot to staleness again, which claiming already handles.
         Atomics.store(runtimeMeta, heartbeatIndex, getMemoryWriteAheadLockClockMs());
+        if (Atomics.compareExchange(runtimeMeta, ownerIdIndex, 0, ownerId) !== 0) {
+            return false;
+        }
+
+        Atomics.store(runtimeMeta, handleCountIndex, 0);
         return true;
     });
 
@@ -404,7 +420,7 @@ const ensureLocalRuntimeLease = (
 
     const runtimeMeta = getRuntimeMeta(runtime);
     const ownerId = createMemoryWriteAheadOwnerId();
-    const freeSlotIndex = claimOwnerLeaseSlot(runtimeMeta, ownerId);
+    const freeSlotIndex = claimOwnerLeaseSlot(runtimeMeta, ownerId, runtime.capacities.fileLockStaleMs);
 
     if (freeSlotIndex === undefined) {
         throw new Error(`MemoryWriteAheadVFS owner lease capacity exhausted for ${runtime.dbFilename}`);

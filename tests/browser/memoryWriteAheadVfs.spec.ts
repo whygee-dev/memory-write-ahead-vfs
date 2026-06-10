@@ -6,6 +6,7 @@ const browserFixtureNames = [
     'runCapacityExceededFailure',
     'runFileLockRegression',
     'runMultipleRuntimeIsolation',
+    'runOwnerLeaseClaimRecovery',
     'runReadmeQuickstart',
     'runRollbackAndPragmaBehavior',
     'runRuntimeLifecycle',
@@ -150,6 +151,17 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
         expect(result.acquiredLockState).toBe(808);
         expect(result.finalLockState).toBe(0);
         expect(result.recoveredAbandonedLockCount).toBe(1);
+    });
+
+    test('reclaims stale orphaned owner lease slots and skips fresh leftovers', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runOwnerLeaseClaimRecovery');
+
+        expect(result.freshSlotZeroOwnerId).toBe(0);
+        expect(result.freshSlotOneOwnerId).toBeGreaterThan(0);
+        expect(result.staleSlotZeroOwnerId).toBeGreaterThan(0);
+        expect(result.staleSlotZeroHandleCount).toBe(1);
+        expect(result.slotZeroOwnerIdAfterRelease).toBe(0);
+        expect(result.slotZeroHeartbeatAfterRelease).toBe(0);
     });
 
     test('rejects opening one main database twice through the same VFS instance', async ({ page }) => {

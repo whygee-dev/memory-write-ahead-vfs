@@ -18,7 +18,12 @@ import {
 } from '../../src/MemoryWriteAheadVFS.js';
 import {
     MEMORY_WRITE_AHEAD_FILE_META,
+    MEMORY_WRITE_AHEAD_OWNER_LEASE_META,
     getMemoryWriteAheadFile,
+    getMemoryWriteAheadLockClockMs,
+    getMemoryWriteAheadRuntimeOwnerSlotOffset,
+    releaseMemoryWriteAheadRuntimeHandle,
+    retainMemoryWriteAheadRuntimeHandle,
     truncateMemoryWriteAheadFile,
     writeMemoryWriteAheadFile,
 } from '../../src/memoryWriteAheadSharedRuntime.js';
@@ -381,6 +386,67 @@ export const runSegmentReclaimAccountingSaturation = () => {
         return {
             reclaimedBytes: after.reclaimedBytes,
             reclaimedSegmentCount: after.reclaimedSegmentCount,
+        };
+    } finally {
+        resetRuntime(dbFilename);
+    }
+};
+
+export const runOwnerLeaseClaimRecovery = () => {
+    ensureCrossOriginIsolated();
+
+    const dbFilename = nextDbFilename('lease-claim');
+    const runtime = createMemoryWriteAheadSharedRuntime(dbFilename);
+    const runtimeMeta = new Int32Array(runtime.registryMeta);
+    const leaseIndex = (slotIndex: number, field: number) =>
+        getMemoryWriteAheadRuntimeOwnerSlotOffset(slotIndex) + field;
+
+    try {
+        // A fresh leftover heartbeat (racing clear or a zombie owner's late heartbeat write) must be skipped.
+        Atomics.store(
+            runtimeMeta,
+            leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.heartbeatMs),
+            getMemoryWriteAheadLockClockMs()
+        );
+        retainMemoryWriteAheadRuntimeHandle(runtime);
+        const freshSlotZeroOwnerId = Atomics.load(
+            runtimeMeta,
+            leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.ownerId)
+        );
+        const freshSlotOneOwnerId = Atomics.load(
+            runtimeMeta,
+            leaseIndex(1, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.ownerId)
+        );
+        releaseMemoryWriteAheadRuntimeHandle(runtime);
+        Atomics.store(runtimeMeta, leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.heartbeatMs), 0);
+
+        // A release interrupted mid-clear strands ownerId 0 with stale leftovers; claiming must reclaim it.
+        Atomics.store(runtimeMeta, leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.handleCount), 2);
+        Atomics.store(runtimeMeta, leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.heartbeatMs), 1);
+        retainMemoryWriteAheadRuntimeHandle(runtime);
+        const staleSlotZeroOwnerId = Atomics.load(
+            runtimeMeta,
+            leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.ownerId)
+        );
+        const staleSlotZeroHandleCount = Atomics.load(
+            runtimeMeta,
+            leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.handleCount)
+        );
+        releaseMemoryWriteAheadRuntimeHandle(runtime);
+
+        return {
+            freshSlotOneOwnerId,
+            freshSlotZeroOwnerId,
+            slotZeroHeartbeatAfterRelease: Atomics.load(
+                runtimeMeta,
+                leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.heartbeatMs)
+            ),
+            slotZeroOwnerIdAfterRelease: Atomics.load(
+                runtimeMeta,
+                leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.ownerId)
+            ),
+            staleSlotZeroHandleCount,
+            staleSlotZeroOwnerId,
         };
     } finally {
         resetRuntime(dbFilename);
