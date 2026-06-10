@@ -10,7 +10,7 @@ const DEFAULT_FILE_LOCK_STALE_MS = 30_000;
 const LOCK_CLOCK_MODULO_MS = 0x7fffffff;
 const MAX_INT32_ATOMIC_COUNTER = 0x7fffffff;
 const MAX_ATOMIC_FILE_SIZE_BYTES = MAX_INT32_ATOMIC_COUNTER;
-const MEMORY_WRITE_AHEAD_OWNER_LEASE_SLOT_COUNT = 32;
+export const MEMORY_WRITE_AHEAD_OWNER_LEASE_SLOT_COUNT = 32;
 const MIN_SEGMENT_COUNT = 1;
 
 const memoryWriteAheadRuntimeLogger = noopMemoryWriteAheadLogger;
@@ -382,6 +382,13 @@ const claimOwnerLeaseSlot = (runtimeMeta: Int32Array, ownerId: number, staleMs: 
         const handleCountIndex = getRuntimeOwnerLeaseIndex(slotIndex, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.handleCount);
         const heartbeatIndex = getRuntimeOwnerLeaseIndex(slotIndex, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.heartbeatMs);
 
+        // Owned slots are never touched here, live or dead: a dead owner's heartbeat must keep aging so
+        // recoverAbandonedRuntimeOwnerLeases can reclaim it. Publishing a fresh heartbeat on a slot whose
+        // CAS would lose anyway used to push that recovery back by a full stale window on every scan.
+        if (Atomics.load(runtimeMeta, ownerIdIndex) !== 0) {
+            return false;
+        }
+
         // A release interrupted mid-clear (clearOwnerLeaseSlot zeroes ownerId first) can strand a slot with
         // ownerId 0 but leftover handleCount/heartbeat; recovery ignores ownerless slots, so reclaim it here.
         // A stale heartbeat is the orphan marker: fresh leftovers (a racing clear or a zombie owner's late
@@ -398,8 +405,8 @@ const claimOwnerLeaseSlot = (runtimeMeta: Int32Array, ownerId: number, staleMs: 
 
         // The heartbeat is published before the CAS so the slot is never visible as "owned with a stale
         // heartbeat": recovery cannot steal a slot mid-claim, and death right after the CAS leaves a fresh
-        // heartbeat that ages into normal recovery instead of an unrecoverable shape. If the CAS loses, the
-        // leftover fresh heartbeat just defers this slot to staleness again, which claiming already handles.
+        // heartbeat that ages into normal recovery instead of an unrecoverable shape. If the CAS loses,
+        // another claimer won the slot and the leftover write is a harmless refresh of its fresh heartbeat.
         Atomics.store(runtimeMeta, heartbeatIndex, getMemoryWriteAheadLockClockMs());
         if (Atomics.compareExchange(runtimeMeta, ownerIdIndex, 0, ownerId) !== 0) {
             return false;
@@ -420,7 +427,14 @@ const ensureLocalRuntimeLease = (
 
     const runtimeMeta = getRuntimeMeta(runtime);
     const ownerId = createMemoryWriteAheadOwnerId();
-    const freeSlotIndex = claimOwnerLeaseSlot(runtimeMeta, ownerId, runtime.capacities.fileLockStaleMs);
+    let freeSlotIndex = claimOwnerLeaseSlot(runtimeMeta, ownerId, runtime.capacities.fileLockStaleMs);
+
+    // Exhaustion can mean every slot is held by a dead owner whose heartbeat has gone stale; claiming never
+    // touches owned slots, so reclaim abandoned leases here and retry once before giving up.
+    if (freeSlotIndex === undefined) {
+        recoverAbandonedRuntimeOwnerLeases(runtime, logger);
+        freeSlotIndex = claimOwnerLeaseSlot(runtimeMeta, ownerId, runtime.capacities.fileLockStaleMs);
+    }
 
     if (freeSlotIndex === undefined) {
         throw new Error(`MemoryWriteAheadVFS owner lease capacity exhausted for ${runtime.dbFilename}`);

@@ -19,6 +19,8 @@ import {
 import {
     MEMORY_WRITE_AHEAD_FILE_META,
     MEMORY_WRITE_AHEAD_OWNER_LEASE_META,
+    MEMORY_WRITE_AHEAD_OWNER_LEASE_SLOT_COUNT,
+    MEMORY_WRITE_AHEAD_RUNTIME_META,
     getMemoryWriteAheadFile,
     getMemoryWriteAheadLockClockMs,
     getMemoryWriteAheadRuntimeOwnerSlotOffset,
@@ -447,6 +449,85 @@ export const runOwnerLeaseClaimRecovery = () => {
             ),
             staleSlotZeroHandleCount,
             staleSlotZeroOwnerId,
+        };
+    } finally {
+        resetRuntime(dbFilename);
+    }
+};
+
+export const runStaleOwnedLeaseSlotPreservation = () => {
+    ensureCrossOriginIsolated();
+
+    const dbFilename = nextDbFilename('lease-stale-owned');
+    const runtime = createMemoryWriteAheadSharedRuntime(dbFilename);
+    const runtimeMeta = new Int32Array(runtime.registryMeta);
+    const leaseIndex = (slotIndex: number, field: number) =>
+        getMemoryWriteAheadRuntimeOwnerSlotOffset(slotIndex) + field;
+    const deadOwnerId = 424242;
+    const staleHeartbeatMs = 1;
+
+    try {
+        // A dead owner's slot: ownerId still set, handles outstanding, heartbeat stale enough for recovery.
+        Atomics.store(runtimeMeta, leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.ownerId), deadOwnerId);
+        Atomics.store(runtimeMeta, leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.handleCount), 2);
+        Atomics.store(runtimeMeta, leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.heartbeatMs), staleHeartbeatMs);
+
+        retainMemoryWriteAheadRuntimeHandle(runtime);
+        const slotZeroOwnerId = Atomics.load(runtimeMeta, leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.ownerId));
+        const slotZeroHeartbeatMs = Atomics.load(
+            runtimeMeta,
+            leaseIndex(0, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.heartbeatMs)
+        );
+        const slotOneOwnerId = Atomics.load(runtimeMeta, leaseIndex(1, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.ownerId));
+        releaseMemoryWriteAheadRuntimeHandle(runtime);
+
+        return { deadOwnerId, slotOneOwnerId, slotZeroHeartbeatMs, slotZeroOwnerId, staleHeartbeatMs };
+    } finally {
+        resetRuntime(dbFilename);
+    }
+};
+
+export const runOwnerLeaseExhaustionRecovery = () => {
+    ensureCrossOriginIsolated();
+
+    const dbFilename = nextDbFilename('lease-exhaustion');
+    const runtime = createMemoryWriteAheadSharedRuntime(dbFilename);
+    const runtimeMeta = new Int32Array(runtime.registryMeta);
+    const leaseIndex = (slotIndex: number, field: number) =>
+        getMemoryWriteAheadRuntimeOwnerSlotOffset(slotIndex) + field;
+    const staleHeartbeatMs = 1;
+
+    try {
+        // Every slot held by a distinct dead owner with one outstanding handle and a stale heartbeat.
+        for (let slotIndex = 0; slotIndex < MEMORY_WRITE_AHEAD_OWNER_LEASE_SLOT_COUNT; slotIndex += 1) {
+            Atomics.store(
+                runtimeMeta,
+                leaseIndex(slotIndex, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.ownerId),
+                1000 + slotIndex
+            );
+            Atomics.store(runtimeMeta, leaseIndex(slotIndex, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.handleCount), 1);
+            Atomics.store(
+                runtimeMeta,
+                leaseIndex(slotIndex, MEMORY_WRITE_AHEAD_OWNER_LEASE_META.heartbeatMs),
+                staleHeartbeatMs
+            );
+        }
+        Atomics.store(
+            runtimeMeta,
+            MEMORY_WRITE_AHEAD_RUNTIME_META.openHandleCount,
+            MEMORY_WRITE_AHEAD_OWNER_LEASE_SLOT_COUNT
+        );
+
+        const claimedOwnerId = retainMemoryWriteAheadRuntimeHandle(runtime);
+        const diagnostics = getMemoryWriteAheadRuntimeDiagnostics(dbFilename);
+        releaseMemoryWriteAheadRuntimeHandle(runtime);
+
+        return {
+            activeOwnerLeaseCount: diagnostics?.activeOwnerLeaseCount ?? null,
+            claimedOwnerId,
+            openHandleCount: diagnostics?.openHandleCount ?? null,
+            recoveredAbandonedHandleCount: diagnostics?.recoveredAbandonedHandleCount ?? null,
+            slotCount: MEMORY_WRITE_AHEAD_OWNER_LEASE_SLOT_COUNT,
         };
     } finally {
         resetRuntime(dbFilename);

@@ -7,6 +7,7 @@ const browserFixtureNames = [
     'runFileLockRegression',
     'runMultipleRuntimeIsolation',
     'runOwnerLeaseClaimRecovery',
+    'runOwnerLeaseExhaustionRecovery',
     'runReadmeQuickstart',
     'runRollbackAndPragmaBehavior',
     'runRuntimeLifecycle',
@@ -17,6 +18,7 @@ const browserFixtureNames = [
     'runSegmentReclaimAccounting',
     'runSegmentReclaimAccountingSaturation',
     'runSnapshotIsolation',
+    'runStaleOwnedLeaseSlotPreservation',
     'runWalRoundTrip',
     'runWorkerConcurrency',
 ] as const;
@@ -162,6 +164,23 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
         expect(result.staleSlotZeroHandleCount).toBe(1);
         expect(result.slotZeroOwnerIdAfterRelease).toBe(0);
         expect(result.slotZeroHeartbeatAfterRelease).toBe(0);
+    });
+
+    test('leaves stale dead-owner lease slots untouched for recovery', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runStaleOwnedLeaseSlotPreservation');
+
+        expect(result.slotZeroOwnerId).toBe(result.deadOwnerId);
+        expect(result.slotZeroHeartbeatMs).toBe(result.staleHeartbeatMs);
+        expect(result.slotOneOwnerId).toBeGreaterThan(0);
+    });
+
+    test('recovers abandoned owner leases when claiming finds every slot exhausted', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runOwnerLeaseExhaustionRecovery');
+
+        expect(result.claimedOwnerId).toBeGreaterThan(0);
+        expect(result.activeOwnerLeaseCount).toBe(1);
+        expect(result.openHandleCount).toBe(1);
+        expect(result.recoveredAbandonedHandleCount).toBe(result.slotCount);
     });
 
     test('rejects opening one main database twice through the same VFS instance', async ({ page }) => {
