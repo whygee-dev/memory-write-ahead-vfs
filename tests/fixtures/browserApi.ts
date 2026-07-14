@@ -6,8 +6,10 @@ import {
     MEMORY_WRITE_AHEAD_VFS,
     MemoryWriteAheadVFS,
     createMemoryWriteAheadSharedRuntime,
+    ensureMemoryWriteAheadDatabaseFiles,
     getMemoryWriteAheadRuntimeDiagnostics,
     normalizeMemoryWriteAheadPathname,
+    recoverTerminatedMemoryWriteAheadRuntimeOwner,
     resolveMemoryWriteAheadRuntimeOptions,
     type MemoryWriteAheadRuntimeOptions,
     type MemoryWriteAheadSharedRuntime,
@@ -310,7 +312,10 @@ export const runSegmentGrowthAndCheckpointReclaim = async () => {
 
             return {
                 count,
+                checkpointCount: databaseFileAfter?.checkpointCount ?? 0,
+                checkpointWriteAheadPages: databaseFileAfter?.checkpointWriteAheadPages ?? 0,
                 databaseSegmentCountAfterCheckpoint: databaseFileAfter?.segmentCount ?? 0,
+                lastCheckpointWriteAheadPages: databaseFileAfter?.lastCheckpointWriteAheadPages ?? 0,
                 payloadBytes,
                 writeAheadLogicalSizeBeforeCheckpoint: writeAheadFilesBefore.reduce(
                     (sum, file) => sum + file.logicalSizeBytes,
@@ -389,6 +394,39 @@ export const runSegmentReclaimAccountingSaturation = () => {
         return {
             reclaimedBytes: after.reclaimedBytes,
             reclaimedSegmentCount: after.reclaimedSegmentCount,
+        };
+    } finally {
+        resetRuntime(dbFilename);
+    }
+};
+
+export const runZeroByteWriteAndDiagnostics = () => {
+    ensureCrossOriginIsolated();
+
+    const dbFilename = nextDbFilename('zero-byte-write');
+    const runtime = createMemoryWriteAheadSharedRuntime(dbFilename, {
+        initialDatabaseCapacityBytes: 64 * 1024,
+        maxDatabaseCapacityBytes: 128 * 1024,
+        initialWriteAheadCapacityBytes: 16 * 1024,
+        maxWriteAheadCapacityBytes: 128 * 1024,
+    });
+    const file = getMemoryWriteAheadFile(runtime, dbFilename);
+    if (!file) {
+        throw new Error(`Missing MemoryWriteAhead file for ${dbFilename}`);
+    }
+
+    try {
+        const bytesWritten = writeMemoryWriteAheadFile(file, new Uint8Array(0), 64 * 1024);
+        const diagnostics = fileDiagnosticsFor(dbFilename, dbFilename);
+
+        return {
+            bytesWritten,
+            logicalSizeBytes: diagnostics.logicalSizeBytes,
+            peakAllocatedCapacityBytes: diagnostics.peakAllocatedCapacityBytes,
+            peakCapacityBytes: diagnostics.peakCapacityBytes,
+            peakLogicalSizeBytes: diagnostics.peakLogicalSizeBytes,
+            writeOperationCount: diagnostics.writeOperationCount,
+            writtenBytes: diagnostics.writtenBytes,
         };
     } finally {
         resetRuntime(dbFilename);
@@ -872,6 +910,154 @@ export const runSnapshotIsolation = async () => {
     }
 };
 
+export const runDeferredWriteUpgrade = async () => {
+    const dbFilename = nextDbFilename('deferred-write');
+    const runtime = createMemoryWriteAheadSharedRuntime(dbFilename);
+
+    try {
+        await withMemoryWriteAheadDatabase(dbFilename, runtime, async (connection) => {
+            await connection.exec('PRAGMA journal_mode=WAL');
+            await connection.exec('CREATE TABLE deferred_rows (id INTEGER PRIMARY KEY, value TEXT NOT NULL)');
+            await connection.exec("INSERT INTO deferred_rows (value) VALUES ('warmup')");
+        });
+
+        return await withMemoryWriteAheadDatabase(dbFilename, runtime, async (connection) => {
+            await connection.exec('BEGIN');
+            await connection.exec('SELECT COUNT(*) FROM deferred_rows');
+            await connection.exec("INSERT INTO deferred_rows (value) VALUES ('transaction')");
+            await connection.exec('COMMIT');
+
+            await connection.exec('SAVEPOINT top_level');
+            await connection.exec('SELECT COUNT(*) FROM deferred_rows');
+            await connection.exec("INSERT INTO deferred_rows (value) VALUES ('savepoint')");
+            await connection.exec('RELEASE SAVEPOINT top_level');
+
+            const rows = await connection.exec('SELECT value FROM deferred_rows ORDER BY id');
+            return rows.rows.map(([value]) => value);
+        });
+    } finally {
+        await waitForOpenHandleCount(dbFilename, 0);
+        resetRuntime(dbFilename);
+    }
+};
+
+export const runAttachedDatabaseConcurrentWrites = async () => {
+    const dbFilename = nextDbFilename('attached-lock-owner');
+    const attachedDbFilename = nextDbFilename('attached-lock-target');
+    const runtime = createMemoryWriteAheadSharedRuntime(dbFilename);
+    ensureMemoryWriteAheadDatabaseFiles(runtime, attachedDbFilename);
+    const connections: BrowserSqliteConnection[] = [];
+
+    const increment = async (connection: BrowserSqliteConnection, iterations: number) => {
+        for (let index = 0; index < iterations; index += 1) {
+            await connection.exec('BEGIN');
+            const current = await connection.exec('SELECT value FROM counter WHERE id = 1');
+            await connection.exec(`UPDATE counter SET value = ${firstNumber(current.rows) + 1} WHERE id = 1`);
+            await connection.exec('COMMIT');
+        }
+    };
+
+    try {
+        await withMemoryWriteAheadDatabase(attachedDbFilename, runtime, async (connection) => {
+            await connection.exec('CREATE TABLE counter (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)');
+            await connection.exec('INSERT INTO counter (id, value) VALUES (1, 0)');
+        });
+
+        const first = await openMemoryWriteAheadDatabase(attachedDbFilename, runtime);
+        connections.push(first);
+        const second = await openMemoryWriteAheadDatabase(attachedDbFilename, runtime);
+        connections.push(second);
+
+        await Promise.all([increment(first, 20), increment(second, 20)]);
+        const counter = await first.exec('SELECT value FROM counter WHERE id = 1');
+        const integrity = await first.exec('PRAGMA integrity_check');
+
+        return {
+            integrity: firstCell(integrity.rows),
+            value: firstNumber(counter.rows),
+        };
+    } finally {
+        await Promise.all(connections.map((connection) => connection.close()));
+        await waitForOpenHandleCount(dbFilename, 0);
+        resetRuntime(dbFilename);
+    }
+};
+
+export const runStaleDeferredWriteRejection = async () => {
+    const dbFilename = nextDbFilename('stale-deferred-write');
+    const runtime = createMemoryWriteAheadSharedRuntime(dbFilename);
+    const connections: BrowserSqliteConnection[] = [];
+
+    try {
+        const connection = await openMemoryWriteAheadDatabase(dbFilename, runtime);
+        connections.push(connection);
+        await connection.exec('PRAGMA journal_mode=WAL');
+        await connection.exec('CREATE TABLE deferred_rows (id INTEGER PRIMARY KEY, value TEXT NOT NULL)');
+        await connection.exec('BEGIN IMMEDIATE');
+        await connection.exec("INSERT INTO deferred_rows (value) VALUES ('warmup')");
+        await connection.exec('COMMIT');
+
+        const otherConnection = await openMemoryWriteAheadDatabase(dbFilename, runtime);
+        connections.push(otherConnection);
+        await connection.exec('BEGIN');
+        await connection.exec('SELECT COUNT(*) FROM deferred_rows');
+        await otherConnection.exec("INSERT INTO deferred_rows (value) VALUES ('concurrent')");
+        const rejectionMessage = await captureErrorMessage(() =>
+            connection.exec("INSERT INTO deferred_rows (value) VALUES ('stale')")
+        );
+        const detailedRejectionMessage = connection.getLastVfsError();
+
+        await connection.exec('ROLLBACK').catch(() => undefined);
+        await connection.exec("INSERT INTO deferred_rows (value) VALUES ('recovered')");
+        const rows = await connection.exec('SELECT value FROM deferred_rows ORDER BY id');
+
+        return {
+            detailedRejectionMessage,
+            rejectionMessage,
+            rows: rows.rows.map(([value]) => value),
+        };
+    } finally {
+        await Promise.all(connections.map((connection) => connection.close()));
+        await waitForOpenHandleCount(dbFilename, 0);
+        resetRuntime(dbFilename);
+    }
+};
+
+export const runAttachedDatabaseAtomicTransaction = async () => {
+    const dbFilename = nextDbFilename('attached-main');
+    const attachedDbFilename = nextDbFilename('attached-secondary');
+    const runtime = createMemoryWriteAheadSharedRuntime(dbFilename);
+    ensureMemoryWriteAheadDatabaseFiles(runtime, attachedDbFilename);
+
+    try {
+        await withMemoryWriteAheadDatabase(dbFilename, runtime, async (connection) => {
+            await connection.exec('PRAGMA journal_mode=WAL');
+            await connection.exec('CREATE TABLE main_rows (id INTEGER PRIMARY KEY, value TEXT NOT NULL)');
+            await connection.exec(`ATTACH DATABASE '${attachedDbFilename}' AS secondary`);
+            await connection.exec('CREATE TABLE secondary.attached_rows (id INTEGER PRIMARY KEY, value TEXT NOT NULL)');
+            await connection.exec('BEGIN IMMEDIATE');
+            await connection.exec("INSERT INTO main_rows (value) VALUES ('main')");
+            await connection.exec("INSERT INTO secondary.attached_rows (value) VALUES ('attached')");
+            await connection.exec('COMMIT');
+        });
+
+        return await withMemoryWriteAheadDatabase(dbFilename, runtime, async (connection) => {
+            await connection.exec(`ATTACH DATABASE '${attachedDbFilename}' AS secondary`);
+            const mainRows = await connection.exec('SELECT value FROM main_rows ORDER BY id');
+            const attachedRows = await connection.exec('SELECT value FROM secondary.attached_rows ORDER BY id');
+
+            return {
+                attachedRows: attachedRows.rows.map(([value]) => value),
+                fileCount: diagnosticsFor(dbFilename).files.length,
+                mainRows: mainRows.rows.map(([value]) => value),
+            };
+        });
+    } finally {
+        await waitForOpenHandleCount(dbFilename, 0);
+        resetRuntime(dbFilename);
+    }
+};
+
 export const runRollbackAndPragmaBehavior = async () => {
     const dbFilename = nextDbFilename('rollback');
     const runtime = createMemoryWriteAheadSharedRuntime(dbFilename, {
@@ -1040,7 +1226,7 @@ export const runWorkerConcurrency = async () => {
     }
 };
 
-type LeaseWorkerMessage = { ok: true } | { ok: false; message: string; stack?: string };
+type LeaseWorkerMessage = { ok: true; ownerId: number } | { ok: false; message: string; stack?: string };
 
 const waitForLeaseWorkerReady = (worker: Worker) =>
     new Promise<LeaseWorkerMessage>((resolve, reject) => {
@@ -1076,13 +1262,92 @@ export const runAbandonedWorkerLeaseRecovery = async () => {
 
         const beforeTerminate = await waitForOpenHandleCount(dbFilename, 3);
         worker.terminate();
-        await wait(350);
+        const recoveredHandleCount = recoverTerminatedMemoryWriteAheadRuntimeOwner(runtime, ready.ownerId);
+        await waitForOpenHandleCount(dbFilename, 0);
         resetRuntime(dbFilename);
 
         return {
             activeOwnerLeaseCountBeforeTerminate: beforeTerminate.activeOwnerLeaseCount,
             diagnosticsAfterReset: getMemoryWriteAheadRuntimeDiagnostics(dbFilename),
             openHandleCountBeforeTerminate: beforeTerminate.openHandleCount,
+            recoveredHandleCount,
+        };
+    } finally {
+        worker.terminate();
+        if (getMemoryWriteAheadRuntimeDiagnostics(dbFilename)) {
+            await waitForOpenHandleCount(dbFilename, 0).catch(() => undefined);
+            resetRuntime(dbFilename);
+        }
+    }
+};
+
+export const runAbandonedAttachedTransactionRecovery = async () => {
+    const dbFilename = nextDbFilename('lease-dirty-main');
+    const attachedDbFilename = nextDbFilename('lease-dirty-attached');
+    const runtime = createMemoryWriteAheadSharedRuntime(dbFilename, {
+        initialDatabaseCapacityBytes: 64 * 1024,
+        maxDatabaseCapacityBytes: 16 * 1024 * 1024,
+        initialWriteAheadCapacityBytes: 16 * 1024,
+        maxWriteAheadCapacityBytes: 16 * 1024 * 1024,
+        fileLockStaleMs: 100,
+    });
+    const attachedFile = ensureMemoryWriteAheadDatabaseFiles(runtime, attachedDbFilename).database;
+    const attachedMeta = new Int32Array(attachedFile.meta);
+    const worker = new Worker(new URL('./leaseWorker.ts', import.meta.url), { type: 'module' });
+
+    try {
+        await withMemoryWriteAheadDatabase(dbFilename, runtime, async (connection) => {
+            await connection.exec('PRAGMA journal_mode=WAL');
+            await connection.exec(`ATTACH DATABASE '${attachedDbFilename}' AS secondary`);
+            await connection.exec(
+                'CREATE TABLE secondary.attached_rows (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)'
+            );
+            await connection.exec(
+                `WITH RECURSIVE rows(id) AS (
+                    SELECT 1
+                    UNION ALL
+                    SELECT id + 1 FROM rows WHERE id < 1000
+                )
+                INSERT INTO secondary.attached_rows (id, payload)
+                SELECT id, zeroblob(4000) FROM rows`
+            );
+        });
+
+        const readyPromise = waitForLeaseWorkerReady(worker);
+        worker.postMessage({ attachedDbFilename, dbFilename, runtime });
+        const ready = await readyPromise;
+        if (!ready.ok) {
+            throw new Error(`${ready.message}\n${ready.stack ?? ''}`);
+        }
+
+        const transactionLockBeforeTerminate = Atomics.load(attachedMeta, MEMORY_WRITE_AHEAD_FILE_META.transactionLock);
+        worker.terminate();
+        const recoveredHandleCount = recoverTerminatedMemoryWriteAheadRuntimeOwner(runtime, ready.ownerId);
+        await waitForOpenHandleCount(dbFilename, 0);
+
+        let attachedReadMessage = '';
+        let lastVfsError = '';
+        await withMemoryWriteAheadDatabase(dbFilename, runtime, async (connection) => {
+            await connection.exec('PRAGMA journal_mode=WAL');
+            attachedReadMessage = await captureErrorMessage(() =>
+                connection.exec(`ATTACH DATABASE '${attachedDbFilename}' AS secondary`)
+            );
+            lastVfsError = connection.getLastVfsError() ?? '';
+        });
+
+        const transactionLockAfterRecovery = Atomics.load(attachedMeta, MEMORY_WRITE_AHEAD_FILE_META.transactionLock);
+        const transactionLockOwnerAfterRecovery = Atomics.load(
+            attachedMeta,
+            MEMORY_WRITE_AHEAD_FILE_META.transactionLockRuntimeOwner
+        );
+
+        return {
+            attachedReadMessage,
+            lastVfsError,
+            recoveredHandleCount,
+            transactionLockAfterRecovery,
+            transactionLockBeforeTerminate,
+            transactionLockOwnerAfterRecovery,
         };
     } finally {
         worker.terminate();

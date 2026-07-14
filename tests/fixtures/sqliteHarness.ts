@@ -19,6 +19,7 @@ type QueryResult = {
 export type BrowserSqliteConnection = {
     close(): Promise<void>;
     exec(sql: string): Promise<QueryResult>;
+    getLastVfsError(): string | null;
 };
 
 export const openMemoryWriteAheadDatabase = async (
@@ -53,6 +54,9 @@ export const openMemoryWriteAheadDatabase = async (
             });
 
             return { columns, rows };
+        },
+        getLastVfsError() {
+            return vfs.lastError?.message ?? null;
         },
     };
 };

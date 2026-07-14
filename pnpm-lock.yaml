@@ -13,9 +13,18 @@ importers:
       '@playwright/test':
         specifier: ^1.51.1
         version: 1.60.0
+      '@powersync/common':
+        specifier: 1.57.2
+        version: 1.57.2
+      '@powersync/web':
+        specifier: 1.39.0
+        version: 1.39.0(@journeyapps/wa-sqlite@1.7.0)(@powersync/common@1.57.2)
       '@types/node':
         specifier: ^20.19.0
         version: 20.19.42
+      comlink:
+        specifier: 4.4.2
+        version: 4.4.2
       prettier:
         specifier: ^3.8.4
         version: 3.8.4
@@ -59,6 +68,18 @@ packages:
       { integrity: sha512-O71yZIbAh/PxDMNGns37GHBIfrVkEVyn+AXyIa5dOTfb4/xNvRWV+Vv/NMbNCtODB/pO7vLlF2OTmMVLhmr7Ag== }
     engines: { node: '>=18' }
     hasBin: true
+
+  '@powersync/common@1.57.2':
+    resolution:
+      { integrity: sha512-cOsmvBFBK0yvpwjaI46Lm3xCMRaTaydQQ4RolED3Upj6/kawGZHhkh4Guve3nmOSQ/0sGCuiFOcl4Gv9Mp6dOA== }
+
+  '@powersync/web@1.39.0':
+    resolution:
+      { integrity: sha512-hl0V8wC4T44cLKG89/ePB97DsVboyVFkT5/WT9SxhIVQNs+zCaTg800UKQscNchUJyVjNHQwTdycjYsKBpqnOQ== }
+    hasBin: true
+    peerDependencies:
+      '@journeyapps/wa-sqlite': ^1.5.0
+      '@powersync/common': ^1.57.2
 
   '@rolldown/binding-android-arm64@1.0.3':
     resolution:
@@ -176,6 +197,15 @@ packages:
     resolution:
       { integrity: sha512-5L7SUaFC1RyDraj2yRhyBzHTobyXHmohD100CChNtyPyleoq37Mqab5Gn8XEKI04dfN/oqPdpHk38MgcQWHbZg== }
 
+  comlink@4.4.2:
+    resolution:
+      { integrity: sha512-OxGdvBmJuNKSCMO4NTl1L47VRp6xn2wG4F/2hYzB6tiCb709otOxtEYCSvK80PtjODfXXZu8ds+Nw5kVCjqd2g== }
+
+  commander@12.1.0:
+    resolution:
+      { integrity: sha512-Vw8qHK3bZM9y/P10u3Vib8o/DdkvA2OtPtZvD871QKjy74Wj1WSKFILMPRPSdUSx5RFK1arlJzEtA4PkFgnbuA== }
+    engines: { node: '>=18' }
+
   detect-libc@2.1.2:
     resolution:
       { integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ== }
@@ -202,6 +232,10 @@ packages:
       { integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw== }
     engines: { node: ^8.16.0 || ^10.6.0 || >=11.0.0 }
     os: [darwin]
+
+  js-logger@1.6.1:
+    resolution:
+      { integrity: sha512-yTgMCPXVjhmg28CuUH8CKjU+cIKL/G+zTu4Fn4lQxs8mRFH/03QTNvEFngcxfg/gRDiQAOoyCKmMTOm9ayOzXA== }
 
   lightningcss-android-arm64@1.32.0:
     resolution:
@@ -429,6 +463,17 @@ snapshots:
     dependencies:
       playwright: 1.60.0
 
+  '@powersync/common@1.57.2':
+    dependencies:
+      js-logger: 1.6.1
+
+  '@powersync/web@1.39.0(@journeyapps/wa-sqlite@1.7.0)(@powersync/common@1.57.2)':
+    dependencies:
+      '@journeyapps/wa-sqlite': 1.7.0
+      '@powersync/common': 1.57.2
+      comlink: 4.4.2
+      commander: 12.1.0
+
   '@rolldown/binding-android-arm64@1.0.3':
     optional: true
 
@@ -489,6 +534,10 @@ snapshots:
     dependencies:
       undici-types: 6.21.0
 
+  comlink@4.4.2: {}
+
+  commander@12.1.0: {}
+
   detect-libc@2.1.2: {}
 
   fdir@6.5.0(picomatch@4.0.4):
@@ -500,6 +549,8 @@ snapshots:
 
   fsevents@2.3.3:
     optional: true
+
+  js-logger@1.6.1: {}
 
   lightningcss-android-arm64@1.32.0:
     optional: true

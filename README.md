@@ -6,6 +6,8 @@ It provides one shared, named, in-memory SQLite runtime that can be structured-c
 
 Originally developed for internal use at Beeldi; this standalone package contains only the generic VFS.
 
+[Reproducible PowerSync MemoryVFS comparison benchmark](https://github.com/whygee-dev/memory-write-ahead-vfs/blob/v0.2.0/benchmarks/memory-vfs-comparison/README.md)
+
 ## Motivation
 
 wa-sqlite's in-memory VFS examples store their bytes in one JavaScript context: a database created in one worker is invisible to every other worker. The common workarounds are to proxy every statement through a single owner worker over `postMessage` (serializing each query and result, and funneling all work through one thread) or to switch to persistent storage such as OPFS or IndexedDB (paying real file I/O and exclusive access-handle coordination for data that never needed to outlive the page).
@@ -32,7 +34,7 @@ On engines without growable `SharedArrayBuffer`, `allowFixedCapacityFallback: tr
 - Cross-origin isolation for pages and module workers that use the runtime:
   `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`.
 - Dedicated workers for blocking lock contention. Opening on the main thread is useful for simple flows, but a contended file lock on the main thread throws instead of blocking.
-- wa-sqlite `>=1.7.0`.
+- wa-sqlite `>=1.7.0 <1.8.0`.
 
 This VFS is ephemeral. It does not persist data across page reloads, tab closes, crashes, or process restarts.
 If growable `SharedArrayBuffer` is unavailable, `allowFixedCapacityFallback: true` uses fixed buffers allocated at each file's max capacity.
@@ -128,6 +130,36 @@ Your development and production servers must send the COOP/COEP headers above fo
 
 File locks are cooperative and heartbeat-based. During long writes and truncates the VFS refreshes the lock heartbeat; if a holder makes no progress for longer than `fileLockStaleMs`, a waiting worker may recover the lock. Tune `fileLockStaleMs` above your worst expected GC pause, tab throttling delay, and write workload duration.
 
+When an application deliberately terminates a worker, it can recover that worker's runtime handles immediately instead of waiting for the stale-heartbeat timeout. Have the worker report `vfs.getRuntimeOwnerId()` to its parent, terminate the worker, then call `recoverTerminatedMemoryWriteAheadRuntimeOwner(runtime, ownerId)` from the parent. If the worker owned an attached-database transaction, the VFS quarantines that database instead of releasing its lock: its rollback journal was local to the terminated context, so exposing the shared pages would be unsafe. Reset the runtime and reload the database from a trusted source before using it again.
+
+## Attached databases
+
+Register each attached database in the shared runtime before executing `ATTACH DATABASE`. While the owning context remains live, atomic transactions spanning the primary and attached databases are coordinated through SQLite's super-journal path. Transactions opened directly on an attached database are serialized across connections because attached databases use SQLite's rollback-journal protocol rather than the primary database's write-ahead path.
+
+```ts
+import { ensureMemoryWriteAheadDatabaseFiles } from 'memory-write-ahead-vfs';
+
+ensureMemoryWriteAheadDatabaseFiles(runtime, '/analytics.sqlite');
+```
+
+If a separate JavaScript context creates the attached files, transfer them back to the runtime owner and register them before another connection opens that database:
+
+```ts
+import { ensureMemoryWriteAheadDatabaseFiles, registerMemoryWriteAheadSharedFiles } from 'memory-write-ahead-vfs';
+
+// Worker that first opens the attached database:
+const attachedFiles = ensureMemoryWriteAheadDatabaseFiles(workerRuntime, '/analytics.sqlite');
+postMessage({ files: [attachedFiles.database, ...attachedFiles.writeAhead] });
+
+// Runtime-owning parent after receiving that structured clone:
+registerMemoryWriteAheadSharedFiles({
+  runtimeDbFilename: parentRuntime.dbFilename,
+  files: event.data.files,
+});
+```
+
+Structured cloning shares the underlying `SharedArrayBuffer`s; it does not copy the database bytes.
+
 ## Capacity options
 
 ```ts
@@ -152,7 +184,9 @@ import { getMemoryWriteAheadRuntimeDiagnostics } from 'memory-write-ahead-vfs';
 const diagnostics = getMemoryWriteAheadRuntimeDiagnostics('/app.sqlite');
 ```
 
-Diagnostics include logical file sizes, segment counts, reclaimed capacity, lock state, open handle counts, and stale-lock recovery counters.
+Diagnostics include logical file sizes, segment counts, reclaimed capacity, lock state, open handle counts, stale-lock recovery counters, and attached databases quarantined after an abandoned transaction.
+
+Version 0.2.0 also records logical-size, active-capacity, and allocated-capacity high-water marks; write and truncate counts; bytes written; lock wait counts and time; and checkpoint counts, duration, and write-ahead pages.
 
 Pass `logger` to `MemoryWriteAheadVFS.create(..., { logger })` for structured debug/error output. `vfs.lastError`
 keeps the last VFS-layer exception for SQLite's `xGetLastError`, and `vfs.log` is a wa-sqlite trace sink toggled by
@@ -169,3 +203,5 @@ pnpm test:browser
 ```
 
 The browser integration tests run through Playwright against a Vite server with COOP/COEP headers enabled.
+
+The package includes a narrowly modified copy of wa-sqlite 1.7.0's `WriteAhead` helper so SQLite deferred transactions can safely upgrade a current read snapshot to a write snapshot. See [`THIRD_PARTY_NOTICES`](https://github.com/whygee-dev/memory-write-ahead-vfs/blob/v0.2.0/THIRD_PARTY_NOTICES) for provenance and license terms.

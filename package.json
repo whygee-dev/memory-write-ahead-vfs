@@ -1,6 +1,6 @@
 {
   "name": "memory-write-ahead-vfs",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "SharedArrayBuffer-backed in-memory write-ahead VFS for wa-sqlite.",
   "type": "module",
   "license": "MIT",
@@ -13,7 +13,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD_PARTY_NOTICES"
   ],
   "exports": {
     ".": {
@@ -25,14 +26,17 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/prepare-dist.mjs",
+    "benchmark": "playwright test --config playwright.benchmark.config.ts",
+    "benchmark:publish-result": "node scripts/publish-benchmark-result.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "playwright test",
     "test:browser": "playwright test",
+    "test:benchmark-publisher": "node --test scripts/publish-benchmark-result.test.mjs",
     "test:stress": "playwright test --repeat-each=20 --workers=1",
     "prepack": "pnpm build",
-    "prepublishOnly": "pnpm format:check && pnpm check && pnpm test:browser && pnpm build"
+    "prepublishOnly": "pnpm format:check && pnpm check && pnpm test:benchmark-publisher && pnpm test:browser && pnpm build"
   },
   "keywords": [
     "sqlite",
@@ -43,12 +47,15 @@
     "browser"
   ],
   "peerDependencies": {
-    "@journeyapps/wa-sqlite": ">=1.7.0"
+    "@journeyapps/wa-sqlite": ">=1.7.0 <1.8.0"
   },
   "devDependencies": {
     "@journeyapps/wa-sqlite": "^1.7.0",
     "@playwright/test": "^1.51.1",
+    "@powersync/common": "1.57.2",
+    "@powersync/web": "1.39.0",
     "@types/node": "^20.19.0",
+    "comlink": "4.4.2",
     "prettier": "^3.8.4",
     "typescript": "^5.9.3",
     "vite": "^8.0.1"

@@ -15,5 +15,13 @@
     "verbatimModuleSyntax": true,
     "allowSyntheticDefaultImports": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "tests/**/*.d.ts", "playwright.config.ts", "vite.config.ts"]
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "tests/**/*.d.ts",
+    "benchmarks/**/*.ts",
+    "playwright.config.ts",
+    "playwright.benchmark.config.ts",
+    "vite.config.ts"
+  ]
 }
