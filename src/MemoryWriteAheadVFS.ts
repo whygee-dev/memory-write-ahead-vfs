@@ -1,8 +1,8 @@
 import { FacadeVFS } from '@journeyapps/wa-sqlite/src/FacadeVFS.js';
 import * as VFS from '@journeyapps/wa-sqlite/src/VFS.js';
 import { LazyLock } from '@journeyapps/wa-sqlite/src/examples/LazyLock.js';
-import { WriteAhead } from '@journeyapps/wa-sqlite/src/examples/WriteAhead.js';
 import { type MemoryWriteAheadLogger, resolveMemoryWriteAheadLogger } from './logger.js';
+import { WriteAhead } from './vendor/WriteAhead.js';
 
 import {
     MEMORY_WRITE_AHEAD_FILE_META,
@@ -13,8 +13,11 @@ import {
     getMemoryWriteAheadFileSizeBytes,
     getMemoryWriteAheadLockAgeMs,
     getMemoryWriteAheadLockClockMs,
+    getMemoryWriteAheadRuntimeOwnerId,
     normalizeMemoryWriteAheadPathname,
     readMemoryWriteAheadFile,
+    recordMemoryWriteAheadCheckpoint,
+    recordMemoryWriteAheadFileLockWait,
     registerMemoryWriteAheadRuntime,
     releaseMemoryWriteAheadRuntimeHandle,
     resetMemoryWriteAheadSharedRuntime,
@@ -40,6 +43,9 @@ type MemoryWriteAheadAccessHandle = {
 
 type MemoryWriteAheadOpenFile = {
     accessHandle?: MemoryWriteAheadAccessHandle;
+    attachedTransactionLockHeld?: boolean;
+    attachedTransactionLockOwnerId?: number;
+    attachedTransactionLockRuntimeOwnerId?: number;
     flags: number;
     lockingMode?: 'exclusive' | 'normal';
     lockState?: number;
@@ -49,6 +55,7 @@ type MemoryWriteAheadOpenFile = {
     readLock?: LazyLock;
     retryResult?: Error | Record<string, never> | null;
     synchronous?: 0 | 1 | 2 | 3;
+    sharedFile?: MemoryWriteAheadSharedFile;
     timeout?: number;
     useLazyLock?: 'none' | 'read' | 'readwrite' | 'write';
     waHandles?: [MemoryWriteAheadAccessHandle, MemoryWriteAheadAccessHandle];
@@ -66,6 +73,12 @@ export type MemoryWriteAheadVFSOptions = {
 
 const FILE_LOCK_WAIT_TIMEOUT_MS = 50;
 const FILE_LOCK_UNLOCKED = 0;
+
+class MemoryWriteAheadBusyError extends Error {
+    override readonly name = 'MemoryWriteAheadBusyError';
+}
+
+const getWaitNowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
 const sanitizeTraceValue = (value: unknown): unknown => {
     if (typeof value !== 'string') {
@@ -119,7 +132,7 @@ const createFileLockOwnerId = () => {
     return Math.floor(Math.random() * 0x3fffffff) + 1;
 };
 
-// Exported from this module for browser regression tests; the package root does not expose these protocol internals.
+// Exported from this module for browser regression tests; the library index does not expose these protocol internals.
 // File lock word: 0 means unlocked, +ownerId means held, -ownerId means a recovery claim owns cleanup.
 // The heartbeat belongs to the positive lock owner or the in-flight acquirer that just observed an unlocked word.
 // Contenders must never refresh the heartbeat while another owner or recovery claim is visible.
@@ -212,7 +225,10 @@ export const acquireMemoryWriteAheadFileLock = (
     staleMs: number,
     logger?: MemoryWriteAheadLogger
 ) => {
-    while (true) {
+    let waitCount = 0;
+    let waitMs = 0;
+
+    for (;;) {
         if (Atomics.load(view, MEMORY_WRITE_AHEAD_FILE_META.lock) === FILE_LOCK_UNLOCKED) {
             Atomics.store(view, MEMORY_WRITE_AHEAD_FILE_META.lockHeartbeatMs, getMemoryWriteAheadLockClockMs());
 
@@ -221,12 +237,17 @@ export const acquireMemoryWriteAheadFileLock = (
                 FILE_LOCK_UNLOCKED
             ) {
                 Atomics.store(view, MEMORY_WRITE_AHEAD_FILE_META.lockOwner, ownerId);
-                return;
+                return { waitCount, waitMs };
             }
         }
 
         recoverAbandonedMemoryWriteAheadFileLock(view, staleMs, logger);
-        waitForUnlock(view);
+        if (Atomics.load(view, MEMORY_WRITE_AHEAD_FILE_META.lock) !== FILE_LOCK_UNLOCKED) {
+            const waitStartMs = getWaitNowMs();
+            waitForUnlock(view);
+            waitCount += 1;
+            waitMs += getWaitNowMs() - waitStartMs;
+        }
     }
 };
 
@@ -276,7 +297,13 @@ class SABMemoryAccessHandle implements MemoryWriteAheadAccessHandle {
     }
 
     #withFileLock<T>(operation: (refreshHeartbeat: () => void) => T) {
-        acquireMemoryWriteAheadFileLock(this.#metaView, this.#lockOwnerId, this.#staleMs, this.#logger);
+        const acquisition = acquireMemoryWriteAheadFileLock(
+            this.#metaView,
+            this.#lockOwnerId,
+            this.#staleMs,
+            this.#logger
+        );
+        recordMemoryWriteAheadFileLockWait(this.file, acquisition.waitCount, acquisition.waitMs);
         try {
             return operation(() => refreshMemoryWriteAheadFileLockHeartbeat(this.#metaView, this.#lockOwnerId));
         } finally {
@@ -303,10 +330,12 @@ class SABMemoryAccessHandle implements MemoryWriteAheadAccessHandle {
 }
 
 class LocalMemoryAccessHandle implements MemoryWriteAheadAccessHandle {
+    #closed = false;
+
     constructor(private readonly file: MemoryWriteAheadLocalFile) {}
 
     close() {
-        return;
+        this.#closed = true;
     }
 
     flush() {
@@ -389,6 +418,10 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
         resetMemoryWriteAheadSharedRuntime(dbFilename);
     }
 
+    getRuntimeOwnerId() {
+        return getMemoryWriteAheadRuntimeOwnerId(this.sharedRuntime);
+    }
+
     #getModule() {
         return (
             this as unknown as {
@@ -410,7 +443,9 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
             const module = this.#getModule();
             const normalizedName = normalizeMemoryWriteAheadPathname(zName);
 
-            if (flags & VFS.SQLITE_OPEN_MAIN_DB) {
+            // The runtime's primary database owns the WriteAhead state and must not be shared between
+            // SQLite connections through one VFS instance; reopening after jClose is supported.
+            if (flags & VFS.SQLITE_OPEN_MAIN_DB && normalizedName === this.sharedRuntime.dbFilename) {
                 const existingFile = this.mapPathToFile.get(normalizedName);
                 // retryResult === null on an unopened existing file means the first open's #retryOpen is
                 // still in flight; wa-sqlite only retries after that op settles, so another open arriving
@@ -468,8 +503,39 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
             this.mapPathToFile.set(normalizedName, file);
             shouldDeletePathOnError = true;
 
-            if (flags & (VFS.SQLITE_OPEN_WAL | VFS.SQLITE_OPEN_SUPER_JOURNAL)) {
-                throw new Error('WAL and super-journal files are managed internally');
+            if (flags & VFS.SQLITE_OPEN_MAIN_DB) {
+                if (!file.accessHandle) {
+                    const sharedFile = getMemoryWriteAheadFile(this.sharedRuntime, normalizedName);
+                    if (!sharedFile) {
+                        throw new Error(
+                            `Missing shared runtime file for ${normalizedName}; register attached database files before opening it`
+                        );
+                    }
+                    file.sharedFile = sharedFile;
+                    file.accessHandle = new SABMemoryAccessHandle(sharedFile, this.sharedRuntime, this.#logger);
+                    file.retryResult = null;
+                }
+
+                file.lockState = VFS.SQLITE_LOCK_NONE;
+                file.lockingMode = 'normal';
+                file.readLock ??= new LazyLock(`${normalizedName}#read`);
+                file.writeLock ??= new LazyLock(`${normalizedName}#write`);
+                file.useLazyLock = 'readwrite';
+                file.timeout = -1;
+                file.synchronous = 1;
+                file.writeHint = null;
+                file.pageSize = null;
+                file.overwrite = false;
+                file.attachedTransactionLockOwnerId ??= createFileLockOwnerId();
+                const runtimeOwnerId = getMemoryWriteAheadRuntimeOwnerId(this.sharedRuntime);
+                if (!runtimeOwnerId) {
+                    throw new Error(`Missing runtime owner for attached database ${normalizedName}`);
+                }
+                file.attachedTransactionLockRuntimeOwnerId ??= runtimeOwnerId;
+            } else if (flags & VFS.SQLITE_OPEN_WAL) {
+                throw new Error('WAL files are managed internally');
+            } else if (flags & VFS.SQLITE_OPEN_SUPER_JOURNAL) {
+                file.accessHandle = this.#openTemporaryHandle(normalizedName, true);
             } else if (!file.accessHandle) {
                 file.accessHandle = this.#openTemporaryHandle(normalizedName, !!(flags & VFS.SQLITE_OPEN_CREATE));
             }
@@ -543,6 +609,7 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
             }
 
             if (file.flags & VFS.SQLITE_OPEN_MAIN_DB) {
+                this.#releaseAttachedDatabaseLock(file);
                 file.writeAhead?.close();
                 file.accessHandle?.close();
                 file.waHandles?.forEach((handle) => handle.close());
@@ -616,9 +683,13 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
 
             if (file.flags & VFS.SQLITE_OPEN_MAIN_DB) {
                 const isPageResize = file.overwrite && file.pageSize !== pData.byteLength;
-                file.writeAhead?.write(iOffset, pData, {
-                    dstPageSize: isPageResize ? (file.pageSize ?? null) : null,
-                });
+                if (file.writeAhead) {
+                    file.writeAhead.write(iOffset, pData, {
+                        dstPageSize: isPageResize ? (file.pageSize ?? null) : null,
+                    });
+                } else {
+                    file.accessHandle?.write(pData.subarray(), { at: iOffset });
+                }
                 return VFS.SQLITE_OK;
             }
 
@@ -645,7 +716,11 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
             }
 
             if (file.flags & VFS.SQLITE_OPEN_MAIN_DB) {
-                file.writeAhead?.truncate(iSize);
+                if (file.writeAhead) {
+                    file.writeAhead.truncate(iSize);
+                } else {
+                    file.accessHandle?.truncate(iSize);
+                }
                 return VFS.SQLITE_OK;
             }
 
@@ -709,6 +784,27 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
                 return VFS.SQLITE_IOERR_LOCK;
             }
 
+            if (file.flags & VFS.SQLITE_OPEN_MAIN_DB && !file.writeAhead) {
+                if (file.lockState === VFS.SQLITE_LOCK_NONE && lockType === VFS.SQLITE_LOCK_SHARED) {
+                    if (file.retryResult instanceof Error) {
+                        const error = file.retryResult;
+                        file.retryResult = null;
+                        throw error;
+                    }
+
+                    if (!file.attachedTransactionLockHeld && !this.#tryLockAttachedDatabase(file)) {
+                        file.retryResult = {};
+                        module.retryOps.push(this.#retryLockAttachedDatabase(file));
+                        return VFS.SQLITE_BUSY;
+                    }
+
+                    file.retryResult = null;
+                }
+
+                file.lockState = lockType;
+                return VFS.SQLITE_OK;
+            }
+
             if (file.lockState === VFS.SQLITE_LOCK_NONE && lockType === VFS.SQLITE_LOCK_SHARED) {
                 if (file.retryResult === null) {
                     if (file.lockingMode === 'exclusive') {
@@ -737,14 +833,39 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
                 }
 
                 file.retryResult = null;
-            } else if (lockType >= VFS.SQLITE_LOCK_RESERVED && !file.writeLock?.mode) {
-                throw new Error('Write transaction cannot use BEGIN DEFERRED');
+            } else if (lockType >= VFS.SQLITE_LOCK_RESERVED && file.writeAhead) {
+                if (file.retryResult instanceof Error) {
+                    const error = file.retryResult;
+                    file.retryResult = null;
+                    throw error;
+                }
+
+                if (file.writeAhead.isolationState !== 'write') {
+                    const holdsWriteLock =
+                        file.writeAhead.isolationState === 'read' && file.writeLock?.acquireIfHeld('exclusive');
+
+                    if (holdsWriteLock) {
+                        if (!file.writeAhead.tryUpgradeReadIsolationToWrite()) {
+                            file.writeLock?.release();
+                            throw new MemoryWriteAheadBusyError(
+                                'Deferred write snapshot is stale; retry the transaction'
+                            );
+                        }
+                    } else {
+                        file.retryResult = {};
+                        module.retryOps.push(this.#retryUpgradeDeferredWrite(file));
+                        return VFS.SQLITE_BUSY;
+                    }
+                }
+
+                file.retryResult = null;
             }
 
             file.lockState = lockType;
             return VFS.SQLITE_OK;
         } catch (error) {
-            if ((error as Error).name === 'TimeoutError') {
+            if ((error as Error).name === 'TimeoutError' || (error as Error).name === 'MemoryWriteAheadBusyError') {
+                this.lastError = error as Error;
                 return VFS.SQLITE_BUSY;
             }
 
@@ -761,6 +882,13 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
             }
 
             if (!file.retryResult && lockType === VFS.SQLITE_LOCK_NONE) {
+                if (file.flags & VFS.SQLITE_OPEN_MAIN_DB && !file.writeAhead) {
+                    this.#releaseAttachedDatabaseLock(file);
+                    file.writeHint = null;
+                    file.lockState = lockType;
+                    return VFS.SQLITE_OK;
+                }
+
                 file.writeAhead?.rejoin();
 
                 switch (file.useLazyLock) {
@@ -1000,6 +1128,8 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
 
     async #pendingCheckpoint(file: MemoryWriteAheadOpenFile, mode: 'full' | 'passive' | 'restart' | 'truncate') {
         const onFinally: Array<() => void> = [];
+        const startedAtMs = getWaitNowMs();
+        const writeAheadPages = file.writeAhead?.getWriteAheadSize() ?? 0;
         try {
             if (mode !== 'passive') {
                 await file.writeLock?.acquire('exclusive');
@@ -1010,6 +1140,10 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
             }
 
             await file.writeAhead?.checkpoint({ isPassive: mode === 'passive' });
+            const sharedFile = getMemoryWriteAheadFile(this.sharedRuntime, file.zName);
+            if (sharedFile && file.writeAhead) {
+                recordMemoryWriteAheadCheckpoint(sharedFile, getWaitNowMs() - startedAtMs, writeAheadPages);
+            }
         } finally {
             while (onFinally.length) {
                 onFinally.pop()?.();
@@ -1020,7 +1154,9 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
     async #retryLockRead(file: MemoryWriteAheadOpenFile) {
         const onError: Array<() => void> = [];
         try {
-            await file.readLock?.acquire('shared', file.timeout);
+            if (!(await file.readLock?.acquire('shared', file.timeout))) {
+                throw new MemoryWriteAheadBusyError(`Timed out acquiring read lock for ${file.zName}`);
+            }
             onError.push(() => file.readLock?.release());
 
             file.writeAhead?.isolateForRead();
@@ -1037,11 +1173,15 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
         const onError: Array<() => void> = [];
         try {
             if (file.lockingMode === 'exclusive') {
-                await file.readLock?.acquire('exclusive', file.timeout);
+                if (!(await file.readLock?.acquire('exclusive', file.timeout))) {
+                    throw new MemoryWriteAheadBusyError(`Timed out acquiring exclusive read lock for ${file.zName}`);
+                }
                 onError.push(() => file.readLock?.release());
             }
 
-            await file.writeLock?.acquire('exclusive', file.timeout);
+            if (!(await file.writeLock?.acquire('exclusive', file.timeout))) {
+                throw new MemoryWriteAheadBusyError(`Timed out acquiring write lock for ${file.zName}`);
+            }
             onError.push(() => file.writeLock?.release());
 
             file.writeAhead?.isolateForWrite();
@@ -1050,6 +1190,94 @@ export class MemoryWriteAheadVFS extends FacadeVFS {
             while (onError.length) {
                 onError.pop()?.();
             }
+            file.retryResult = error as Error;
+        }
+    }
+
+    async #retryLockAttachedDatabase(file: MemoryWriteAheadOpenFile) {
+        try {
+            const deadline = file.timeout && file.timeout > 0 ? getWaitNowMs() + file.timeout : null;
+            while (!this.#tryLockAttachedDatabase(file)) {
+                if (file.timeout === 0 || (deadline !== null && getWaitNowMs() >= deadline)) {
+                    throw new MemoryWriteAheadBusyError(`Timed out acquiring attached database lock for ${file.zName}`);
+                }
+                await new Promise((resolve) => setTimeout(resolve, 1));
+            }
+            file.retryResult = {};
+        } catch (error) {
+            this.#releaseAttachedDatabaseLock(file);
+            file.retryResult = error as Error;
+        }
+    }
+
+    #tryLockAttachedDatabase(file: MemoryWriteAheadOpenFile) {
+        if (file.attachedTransactionLockHeld) {
+            return true;
+        }
+
+        const sharedFile = file.sharedFile;
+        const lockOwnerId = file.attachedTransactionLockOwnerId;
+        const runtimeOwnerId = file.attachedTransactionLockRuntimeOwnerId;
+        if (!sharedFile || !lockOwnerId || !runtimeOwnerId) {
+            throw new Error(`Missing attached database lock state for ${file.zName}`);
+        }
+
+        const meta = new Int32Array(sharedFile.meta);
+        if (Atomics.load(meta, MEMORY_WRITE_AHEAD_FILE_META.abandonedTransaction) !== 0) {
+            throw new MemoryWriteAheadBusyError(
+                `Attached database ${file.zName} is quarantined after its transaction owner terminated; reset and reload the runtime from a trusted source`
+            );
+        }
+
+        const claim = -lockOwnerId;
+        if (Atomics.compareExchange(meta, MEMORY_WRITE_AHEAD_FILE_META.transactionLock, 0, claim) !== 0) {
+            return false;
+        }
+
+        Atomics.store(meta, MEMORY_WRITE_AHEAD_FILE_META.transactionLockRuntimeOwner, runtimeOwnerId);
+        if (Atomics.compareExchange(meta, MEMORY_WRITE_AHEAD_FILE_META.transactionLock, claim, lockOwnerId) !== claim) {
+            throw new Error(`Lost attached database lock claim for ${file.zName}`);
+        }
+
+        file.attachedTransactionLockHeld = true;
+        return true;
+    }
+
+    #releaseAttachedDatabaseLock(file: MemoryWriteAheadOpenFile) {
+        if (!file.attachedTransactionLockHeld || !file.sharedFile || !file.attachedTransactionLockOwnerId) {
+            return;
+        }
+
+        const meta = new Int32Array(file.sharedFile.meta);
+        const releaseClaim = -file.attachedTransactionLockOwnerId;
+        if (
+            Atomics.compareExchange(
+                meta,
+                MEMORY_WRITE_AHEAD_FILE_META.transactionLock,
+                file.attachedTransactionLockOwnerId,
+                releaseClaim
+            ) === file.attachedTransactionLockOwnerId
+        ) {
+            Atomics.store(meta, MEMORY_WRITE_AHEAD_FILE_META.transactionLockRuntimeOwner, 0);
+            Atomics.compareExchange(meta, MEMORY_WRITE_AHEAD_FILE_META.transactionLock, releaseClaim, 0);
+            Atomics.notify(meta, MEMORY_WRITE_AHEAD_FILE_META.transactionLock);
+        }
+        file.attachedTransactionLockHeld = false;
+    }
+
+    async #retryUpgradeDeferredWrite(file: MemoryWriteAheadOpenFile) {
+        try {
+            if (!(await file.writeLock?.acquire('exclusive', file.timeout))) {
+                throw new MemoryWriteAheadBusyError(`Timed out acquiring write lock for ${file.zName}`);
+            }
+
+            if (!requireWriteAhead(file).tryUpgradeReadIsolationToWrite()) {
+                throw new MemoryWriteAheadBusyError('Deferred write snapshot is stale; retry the transaction');
+            }
+
+            file.retryResult = {};
+        } catch (error) {
+            file.writeLock?.release();
             file.retryResult = error as Error;
         }
     }

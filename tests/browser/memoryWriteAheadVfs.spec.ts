@@ -2,9 +2,13 @@ import { expect, type Page, test } from '@playwright/test';
 
 const browserFixtureNames = [
     'runAbandonedFileLockWorkerRecovery',
+    'runAbandonedAttachedTransactionRecovery',
     'runAbandonedWorkerLeaseRecovery',
+    'runAttachedDatabaseAtomicTransaction',
+    'runAttachedDatabaseConcurrentWrites',
     'runCapacityExceededFailure',
     'runDuplicatePendingOpenRejection',
+    'runDeferredWriteUpgrade',
     'runFileLockRegression',
     'runMultipleRuntimeIsolation',
     'runOwnerLeaseClaimRecovery',
@@ -19,9 +23,11 @@ const browserFixtureNames = [
     'runSegmentReclaimAccounting',
     'runSegmentReclaimAccountingSaturation',
     'runSnapshotIsolation',
+    'runStaleDeferredWriteRejection',
     'runStaleOwnedLeaseSlotPreservation',
     'runWalRoundTrip',
     'runWorkerConcurrency',
+    'runZeroByteWriteAndDiagnostics',
 ] as const;
 
 type BrowserApi = typeof import('../fixtures/browserApi.js');
@@ -80,6 +86,9 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
 
         expect(result.count).toBe(40);
         expect(result.payloadBytes).toBe(40 * 2048);
+        expect(result.checkpointCount).toBeGreaterThanOrEqual(1);
+        expect(result.checkpointWriteAheadPages).toBeGreaterThan(0);
+        expect(result.lastCheckpointWriteAheadPages).toBeGreaterThan(0);
         expect(result.writeAheadExpandedBeforeCheckpoint).toBe(true);
         expect(result.writeAheadLogicalSizeBeforeCheckpoint).toBeGreaterThan(0);
         expect(result.writeAheadSegmentCountAfterCheckpoint).toBeGreaterThanOrEqual(2);
@@ -103,6 +112,18 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
         expect(result.reclaimedSegmentCount).toBe(0x7fffffff);
     });
 
+    test('extends logical size for zero-byte writes and records high-water diagnostics', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runZeroByteWriteAndDiagnostics');
+
+        expect(result.bytesWritten).toBe(0);
+        expect(result.logicalSizeBytes).toBe(64 * 1024);
+        expect(result.peakLogicalSizeBytes).toBe(64 * 1024);
+        expect(result.peakCapacityBytes).toBeGreaterThanOrEqual(64 * 1024);
+        expect(result.peakAllocatedCapacityBytes).toBeGreaterThanOrEqual(64 * 1024);
+        expect(result.writeOperationCount).toBe(1);
+        expect(result.writtenBytes).toBe(0);
+    });
+
     test('fails at configured capacity and logs the underlying VFS capacity error', async ({ page }) => {
         const result = await runBrowserFixture(page, 'runCapacityExceededFailure');
 
@@ -117,6 +138,36 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
         expect(result.before).toEqual(['before']);
         expect(result.during).toEqual(['before']);
         expect(result.after).toEqual(['before', 'during-1', 'during-2']);
+    });
+
+    test('upgrades deferred and savepoint transactions from reads to writes', async ({ page }) => {
+        const rows = await runBrowserFixture(page, 'runDeferredWriteUpgrade');
+
+        expect(rows).toEqual(['warmup', 'transaction', 'savepoint']);
+    });
+
+    test('rejects a deferred write when another connection made its snapshot stale', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runStaleDeferredWriteRejection');
+
+        expect(result.rejectionMessage).toContain('database is locked');
+        expect(result.detailedRejectionMessage).toContain('snapshot is stale');
+        expect(result.detailedRejectionMessage).not.toContain('Not in write isolated state');
+        expect(result.rows).toEqual(['warmup', 'concurrent', 'recovered']);
+    });
+
+    test('commits atomically across the primary and an attached shared database', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runAttachedDatabaseAtomicTransaction');
+
+        expect(result.mainRows).toEqual(['main']);
+        expect(result.attachedRows).toEqual(['attached']);
+        expect(result.fileCount).toBe(6);
+    });
+
+    test('serializes concurrent transactions opened directly on an attached shared database', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runAttachedDatabaseConcurrentWrites');
+
+        expect(result.value).toBe(40);
+        expect(result.integrity).toBe('ok');
     });
 
     test('preserves rollback semantics and VFS pragma round-trips', async ({ page }) => {
@@ -230,12 +281,24 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
         expect(result.openHandleCountAfterClose).toBe(0);
     });
 
-    test('recovers abandoned worker runtime leases after stale heartbeat', async ({ page }) => {
+    test('recovers terminated-worker runtime leases immediately', async ({ page }) => {
         const result = await runBrowserFixture(page, 'runAbandonedWorkerLeaseRecovery');
 
         expect(result.openHandleCountBeforeTerminate).toBe(3);
         expect(result.activeOwnerLeaseCountBeforeTerminate).toBe(1);
+        expect(result.recoveredHandleCount).toBe(3);
         expect(result.diagnosticsAfterReset).toBeNull();
+    });
+
+    test('quarantines an attached database when its transaction owner terminates', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runAbandonedAttachedTransactionRecovery');
+
+        expect(result.recoveredHandleCount).toBeGreaterThan(0);
+        expect(result.transactionLockBeforeTerminate).toBeGreaterThan(0);
+        expect(result.transactionLockAfterRecovery).toBe(result.transactionLockBeforeTerminate);
+        expect(result.transactionLockOwnerAfterRecovery).toBeGreaterThan(0);
+        expect(result.attachedReadMessage).toContain('database is locked');
+        expect(result.lastVfsError).toContain('quarantined');
     });
 
     test('keeps named runtimes isolated when one runtime is reset', async ({ page }) => {

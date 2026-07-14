@@ -1,0 +1,406 @@
+{
+  "resultFormat": "memory-vfs-implementation-stack-v1",
+  "schemaVersion": 1,
+  "runDate": "2026-07-14",
+  "comparisonScope": "implementation-stack",
+  "environment": {
+    "browser": "Chromium 148.0.7778.96",
+    "crossOriginIsolated": true,
+    "hardwareConcurrency": 18
+  },
+  "harness": {
+    "memoryWriteAheadUseWebWorker": true,
+    "powerSyncUseWebWorker": true,
+    "webServer": "vite-development"
+  },
+  "runtimeVersions": {
+    "memoryWriteAheadVfs": "0.2.0",
+    "playwright": "1.60.0",
+    "powerSyncCommon": "1.57.2",
+    "powerSyncWeb": "1.39.0",
+    "vite": "8.0.16",
+    "waSqlite": "1.7.0"
+  },
+  "configuration": {
+    "burstTrials": 12,
+    "cacheSizeKiB": 32768,
+    "correctnessValidation": [
+      "dataset-row-counts",
+      "cross-arm-full-result-sha256",
+      "per-trial-checksum",
+      "write-row-count",
+      "final-write-values",
+      "additional-reader-query-only"
+    ],
+    "dataset": {
+      "collections": 30,
+      "runs": 12,
+      "recordsPerCollection": 1000,
+      "labelsPerCollection": 100,
+      "groups": 6
+    },
+    "mixedTrials": 8,
+    "openPasses": 30,
+    "queriesPerTrial": 8,
+    "sequentialTrials": 10,
+    "warmupTrials": 2,
+    "workloadPasses": 10
+  },
+  "arms": [
+    {
+      "additionalReaderCount": 0,
+      "aggregateCacheSizeKiB": 32768,
+      "burst": {
+        "max": 38.19,
+        "mean": 32.03,
+        "min": 29.55,
+        "p50": 31.7,
+        "p95": 34.78,
+        "samples": 120
+      },
+      "connectionCount": 1,
+      "firstRead": {
+        "max": 76.43,
+        "mean": 42.39,
+        "min": 36.18,
+        "p50": 39.68,
+        "p95": 57.71,
+        "samples": 30
+      },
+      "firstWrite": {
+        "max": 54.27,
+        "mean": 43.74,
+        "min": 39.3,
+        "p50": 42.52,
+        "p95": 50.14,
+        "samples": 30
+      },
+      "mixedRead": {
+        "max": 41.32,
+        "mean": 32.11,
+        "min": 29.15,
+        "p50": 31.84,
+        "p95": 36.35,
+        "samples": 80
+      },
+      "mixedWrite": {
+        "max": 41.74,
+        "mean": 32.57,
+        "min": 29.64,
+        "p50": 32.27,
+        "p95": 36.8,
+        "samples": 80
+      },
+      "name": "powersync-memory-vfs-1",
+      "poolReady": {
+        "max": 46.81,
+        "mean": 37.51,
+        "min": 33.38,
+        "p50": 36.2,
+        "p95": 45.56,
+        "samples": 30
+      },
+      "seed": {
+        "max": 96.8,
+        "mean": 90.1,
+        "min": 86.11,
+        "p50": 88.41,
+        "p95": 96.8,
+        "samples": 10
+      },
+      "sequential": {
+        "max": 40.7,
+        "mean": 32.38,
+        "min": 29.81,
+        "p50": 31.97,
+        "p95": 34.69,
+        "samples": 100
+      },
+      "vfs": "InMemoryVFS"
+    },
+    {
+      "additionalReaderCount": 0,
+      "aggregateCacheSizeKiB": 32768,
+      "burst": {
+        "max": 38.47,
+        "mean": 31.59,
+        "min": 28.76,
+        "p50": 31.43,
+        "p95": 34.05,
+        "samples": 120
+      },
+      "connectionCount": 1,
+      "firstRead": {
+        "max": 55.59,
+        "mean": 44.45,
+        "min": 39.46,
+        "p50": 44.06,
+        "p95": 54.13,
+        "samples": 30
+      },
+      "firstWrite": {
+        "max": 52.92,
+        "mean": 45.61,
+        "min": 42.82,
+        "p50": 44.8,
+        "p95": 51.34,
+        "samples": 30
+      },
+      "mixedRead": {
+        "max": 34.53,
+        "mean": 31.47,
+        "min": 29.03,
+        "p50": 31.47,
+        "p95": 33.25,
+        "samples": 80
+      },
+      "mixedWrite": {
+        "max": 35.09,
+        "mean": 31.92,
+        "min": 29.56,
+        "p50": 31.89,
+        "p95": 33.76,
+        "samples": 80
+      },
+      "name": "memory-write-ahead-1",
+      "poolReady": {
+        "max": 52.58,
+        "mean": 43.2,
+        "min": 39.46,
+        "p50": 42.39,
+        "p95": 49.74,
+        "samples": 30
+      },
+      "seed": {
+        "max": 133.64,
+        "mean": 111.34,
+        "min": 102.76,
+        "p50": 107.09,
+        "p95": 133.64,
+        "samples": 10
+      },
+      "sequential": {
+        "max": 36.66,
+        "mean": 31.99,
+        "min": 29.57,
+        "p50": 31.71,
+        "p95": 35.76,
+        "samples": 100
+      },
+      "vfs": "MemoryWriteAheadVFS"
+    },
+    {
+      "additionalReaderCount": 1,
+      "aggregateCacheSizeKiB": 65536,
+      "burst": {
+        "max": 23.86,
+        "mean": 18.53,
+        "min": 17.26,
+        "p50": 18.34,
+        "p95": 19.85,
+        "samples": 120
+      },
+      "connectionCount": 2,
+      "firstRead": {
+        "max": 65.41,
+        "mean": 45.31,
+        "min": 39.61,
+        "p50": 43.59,
+        "p95": 53.15,
+        "samples": 30
+      },
+      "firstWrite": {
+        "max": 55.38,
+        "mean": 46.09,
+        "min": 41.71,
+        "p50": 44.99,
+        "p95": 52.58,
+        "samples": 30
+      },
+      "mixedRead": {
+        "max": 23.85,
+        "mean": 19.58,
+        "min": 18.01,
+        "p50": 19.3,
+        "p95": 22.86,
+        "samples": 80
+      },
+      "mixedWrite": {
+        "max": 17.88,
+        "mean": 14.11,
+        "min": 12.66,
+        "p50": 13.77,
+        "p95": 16.36,
+        "samples": 80
+      },
+      "name": "memory-write-ahead-2",
+      "poolReady": {
+        "max": 94.03,
+        "mean": 77,
+        "min": 71.1,
+        "p50": 74.39,
+        "p95": 89.62,
+        "samples": 30
+      },
+      "seed": {
+        "max": 112.65,
+        "mean": 106.51,
+        "min": 97.83,
+        "p50": 107.87,
+        "p95": 112.65,
+        "samples": 10
+      },
+      "sequential": {
+        "max": 43.56,
+        "mean": 32.01,
+        "min": 29.91,
+        "p50": 31.64,
+        "p95": 34.69,
+        "samples": 100
+      },
+      "vfs": "MemoryWriteAheadVFS"
+    },
+    {
+      "additionalReaderCount": 2,
+      "aggregateCacheSizeKiB": 98304,
+      "burst": {
+        "max": 21.82,
+        "mean": 16.47,
+        "min": 14.97,
+        "p50": 16.17,
+        "p95": 18.88,
+        "samples": 120
+      },
+      "connectionCount": 3,
+      "firstRead": {
+        "max": 64.98,
+        "mean": 46.41,
+        "min": 39.71,
+        "p50": 44.24,
+        "p95": 64.41,
+        "samples": 30
+      },
+      "firstWrite": {
+        "max": 63.13,
+        "mean": 51.07,
+        "min": 44.95,
+        "p50": 49.91,
+        "p95": 61.93,
+        "samples": 30
+      },
+      "mixedRead": {
+        "max": 21.2,
+        "mean": 17.02,
+        "min": 15.44,
+        "p50": 16.69,
+        "p95": 19.68,
+        "samples": 80
+      },
+      "mixedWrite": {
+        "max": 10.26,
+        "mean": 8.26,
+        "min": 7.26,
+        "p50": 7.99,
+        "p95": 9.51,
+        "samples": 80
+      },
+      "name": "memory-write-ahead-3",
+      "poolReady": {
+        "max": 101.04,
+        "mean": 83.03,
+        "min": 75.06,
+        "p50": 80.16,
+        "p95": 96.01,
+        "samples": 30
+      },
+      "seed": {
+        "max": 113.31,
+        "mean": 107.7,
+        "min": 102.64,
+        "p50": 106.63,
+        "p95": 113.31,
+        "samples": 10
+      },
+      "sequential": {
+        "max": 38.03,
+        "mean": 32.06,
+        "min": 30.01,
+        "p50": 31.91,
+        "p95": 34.32,
+        "samples": 100
+      },
+      "vfs": "MemoryWriteAheadVFS"
+    },
+    {
+      "additionalReaderCount": 3,
+      "aggregateCacheSizeKiB": 131072,
+      "burst": {
+        "max": 18.87,
+        "mean": 15.36,
+        "min": 14,
+        "p50": 15.09,
+        "p95": 17.69,
+        "samples": 120
+      },
+      "connectionCount": 4,
+      "firstRead": {
+        "max": 56.03,
+        "mean": 45.32,
+        "min": 40.89,
+        "p50": 44.63,
+        "p95": 49.59,
+        "samples": 30
+      },
+      "firstWrite": {
+        "max": 62.36,
+        "mean": 52.61,
+        "min": 43.5,
+        "p50": 52.78,
+        "p95": 61.03,
+        "samples": 30
+      },
+      "mixedRead": {
+        "max": 19.61,
+        "mean": 16.14,
+        "min": 14.14,
+        "p50": 15.93,
+        "p95": 18.02,
+        "samples": 80
+      },
+      "mixedWrite": {
+        "max": 9.16,
+        "mean": 7.29,
+        "min": 6.39,
+        "p50": 7.06,
+        "p95": 8.55,
+        "samples": 80
+      },
+      "name": "memory-write-ahead-4",
+      "poolReady": {
+        "max": 106.63,
+        "mean": 86.88,
+        "min": 74.96,
+        "p50": 87.64,
+        "p95": 104.61,
+        "samples": 30
+      },
+      "seed": {
+        "max": 114.5,
+        "mean": 105.94,
+        "min": 99.24,
+        "p50": 105.65,
+        "p95": 114.5,
+        "samples": 10
+      },
+      "sequential": {
+        "max": 38.02,
+        "mean": 31.72,
+        "min": 29.15,
+        "p50": 31.49,
+        "p95": 35.02,
+        "samples": 100
+      },
+      "vfs": "MemoryWriteAheadVFS"
+    }
+  ]
+}
