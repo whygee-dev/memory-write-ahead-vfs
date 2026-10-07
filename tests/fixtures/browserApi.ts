@@ -1090,6 +1090,44 @@ export const runAttachedDatabaseAtomicTransaction = async () => {
     }
 };
 
+export const runAttachedDatabaseWithoutWriteAheadFiles = async () => {
+    const dbFilename = nextDbFilename('attached-files-main');
+    const attachedDbFilename = nextDbFilename('attached-files-secondary');
+    const runtime = createMemoryWriteAheadSharedRuntime(dbFilename);
+    const primaryFiles = ensureMemoryWriteAheadDatabaseFiles(runtime, dbFilename);
+    const attachedFiles = ensureMemoryWriteAheadDatabaseFiles(runtime, attachedDbFilename);
+    const labelPathname = (pathname: string) =>
+        [
+            { filename: dbFilename, label: 'main' },
+            { filename: attachedDbFilename, label: 'attached' },
+        ].reduce(
+            (labelled, { filename, label }) =>
+                labelled.startsWith(filename) ? `${label}${labelled.slice(filename.length)}` : labelled,
+            pathname
+        );
+
+    try {
+        const attachedRows = await withMemoryWriteAheadDatabase(dbFilename, runtime, async (connection) => {
+            await connection.exec('PRAGMA journal_mode=WAL');
+            await connection.exec(`ATTACH DATABASE '${attachedDbFilename}' AS secondary`);
+            await connection.exec('CREATE TABLE secondary.attached_rows (id INTEGER PRIMARY KEY, value TEXT NOT NULL)');
+            await connection.exec("INSERT INTO secondary.attached_rows (value) VALUES ('attached')");
+            const rows = await connection.exec('SELECT value FROM secondary.attached_rows ORDER BY id');
+            return rows.rows.map(([value]) => value);
+        });
+
+        return {
+            attachedRows,
+            attachedWriteAheadFileCount: attachedFiles.writeAhead.length,
+            pathnames: diagnosticsFor(dbFilename).files.map((file) => labelPathname(file.pathname)),
+            primaryWriteAheadFileCount: primaryFiles.writeAhead.length,
+        };
+    } finally {
+        await waitForOpenHandleCount(dbFilename, 0);
+        resetRuntime(dbFilename);
+    }
+};
+
 export const runRollbackAndPragmaBehavior = async () => {
     const dbFilename = nextDbFilename('rollback');
     const runtime = createMemoryWriteAheadSharedRuntime(dbFilename, {

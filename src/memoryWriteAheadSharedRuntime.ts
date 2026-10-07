@@ -122,7 +122,7 @@ export type MemoryWriteAheadSharedRuntime = {
 
 export type MemoryWriteAheadDatabaseFiles = {
     database: MemoryWriteAheadSharedFile;
-    writeAhead: [MemoryWriteAheadSharedFile, MemoryWriteAheadSharedFile];
+    writeAhead: MemoryWriteAheadSharedFile[];
 };
 
 export type MemoryWriteAheadSharedFilesRegistration = {
@@ -936,14 +936,21 @@ export const ensureMemoryWriteAheadDatabaseFiles = (
     dbFilename: string
 ): MemoryWriteAheadDatabaseFiles => {
     const normalizedDbFilename = normalizeMemoryWriteAheadPathname(dbFilename);
+    const database = ensureSharedFile(
+        runtime,
+        normalizedDbFilename,
+        runtime.capacities.initialDatabaseCapacityBytes,
+        runtime.capacities.maxDatabaseCapacityBytes
+    );
+
+    // Only the runtime's primary database is opened with a WriteAhead. Attached databases use SQLite's rollback
+    // journal, so a -wa0/-wa1 pair for them would only consume growable SharedArrayBuffer reservation.
+    if (normalizedDbFilename !== runtime.dbFilename) {
+        return { database, writeAhead: [] };
+    }
 
     return {
-        database: ensureSharedFile(
-            runtime,
-            normalizedDbFilename,
-            runtime.capacities.initialDatabaseCapacityBytes,
-            runtime.capacities.maxDatabaseCapacityBytes
-        ),
+        database,
         writeAhead: [
             ensureSharedFile(
                 runtime,

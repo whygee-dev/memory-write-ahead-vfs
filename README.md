@@ -134,7 +134,7 @@ When an application deliberately terminates a worker, it can recover that worker
 
 ## Attached databases
 
-Register each attached database in the shared runtime before executing `ATTACH DATABASE`. While the owning context remains live, atomic transactions spanning the primary and attached databases are coordinated through SQLite's super-journal path. Transactions opened directly on an attached database are serialized across connections because attached databases use SQLite's rollback-journal protocol rather than the primary database's write-ahead path.
+Register each attached database in the shared runtime before executing `ATTACH DATABASE`. While the owning context remains live, atomic transactions spanning the primary and attached databases are coordinated through SQLite's super-journal path. Transactions opened directly on an attached database are serialized across connections because attached databases use SQLite's rollback-journal protocol rather than the primary database's write-ahead path. For the same reason an attached database reserves only its database file: `ensureMemoryWriteAheadDatabaseFiles` returns an empty `writeAhead` list for any filename other than the runtime's primary database.
 
 ```ts
 import { ensureMemoryWriteAheadDatabaseFiles } from 'memory-write-ahead-vfs';
@@ -149,7 +149,7 @@ import { ensureMemoryWriteAheadDatabaseFiles, registerMemoryWriteAheadSharedFile
 
 // Worker that first opens the attached database:
 const attachedFiles = ensureMemoryWriteAheadDatabaseFiles(workerRuntime, '/analytics.sqlite');
-postMessage({ files: [attachedFiles.database, ...attachedFiles.writeAhead] });
+postMessage({ files: [attachedFiles.database] });
 
 // Runtime-owning parent after receiving that structured clone:
 registerMemoryWriteAheadSharedFiles({

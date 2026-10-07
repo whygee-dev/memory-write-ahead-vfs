@@ -6,6 +6,7 @@ const browserFixtureNames = [
     'runAbandonedWorkerLeaseRecovery',
     'runAttachedDatabaseAtomicTransaction',
     'runAttachedDatabaseConcurrentWrites',
+    'runAttachedDatabaseWithoutWriteAheadFiles',
     'runCapacityExceededFailure',
     'runDuplicatePendingOpenRejection',
     'runDeferredWriteUpgrade',
@@ -171,7 +172,16 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
 
         expect(result.mainRows).toEqual(['main']);
         expect(result.attachedRows).toEqual(['attached']);
-        expect(result.fileCount).toBe(6);
+        expect(result.fileCount).toBe(4);
+    });
+
+    test('reserves no write-ahead files for an attached database', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runAttachedDatabaseWithoutWriteAheadFiles');
+
+        expect(result.primaryWriteAheadFileCount).toBe(2);
+        expect(result.attachedWriteAheadFileCount).toBe(0);
+        expect(result.pathnames).toEqual(['main', 'main-wa0', 'main-wa1', 'attached']);
+        expect(result.attachedRows).toEqual(['attached']);
     });
 
     test('serializes concurrent transactions opened directly on an attached shared database', async ({ page }) => {
