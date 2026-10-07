@@ -1111,13 +1111,7 @@ export const recoverTerminatedMemoryWriteAheadRuntimeOwner = (
 };
 
 const resetMemoryWriteAheadRuntimeState = (runtime: MemoryWriteAheadSharedRuntime) => {
-    recoverAbandonedRuntimeOwnerLeases(runtime);
     const runtimeMeta = getRuntimeMeta(runtime);
-    const openHandleCount = getOpenHandleCount(runtime);
-
-    if (openHandleCount > 0) {
-        throw new Error(`Cannot reset MemoryWriteAheadVFS while ${openHandleCount} open handles remain`);
-    }
 
     Object.values(runtime.files).forEach((file) => {
         const meta = getFileMeta(file);
@@ -1143,7 +1137,8 @@ const resetMemoryWriteAheadRuntimeState = (runtime: MemoryWriteAheadSharedRuntim
 };
 
 // With a dbFilename, resets only that runtime so concurrent clients (e.g. other databases) keep their
-// runtimes; without one, resets every registered runtime (used by test teardown for a clean slate).
+// runtimes, and refuses while that runtime has open handles. Without one, resets and deregisters every
+// registered runtime even when handles were never released (used by test teardown for a clean slate).
 export const resetMemoryWriteAheadSharedRuntime = (dbFilename?: string) => {
     const registry = getRuntimeRegistry();
 
@@ -1152,6 +1147,12 @@ export const resetMemoryWriteAheadSharedRuntime = (dbFilename?: string) => {
         const runtime = registry.get(normalizedDbFilename);
         if (!runtime) {
             return;
+        }
+
+        recoverAbandonedRuntimeOwnerLeases(runtime);
+        const openHandleCount = getOpenHandleCount(runtime);
+        if (openHandleCount > 0) {
+            throw new Error(`Cannot reset MemoryWriteAheadVFS while ${openHandleCount} open handles remain`);
         }
 
         resetMemoryWriteAheadRuntimeState(runtime);

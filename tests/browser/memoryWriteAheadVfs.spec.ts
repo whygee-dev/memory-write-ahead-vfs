@@ -8,6 +8,7 @@ const browserFixtureNames = [
     'runAttachedDatabaseConcurrentWrites',
     'runAttachedDatabaseWithoutWriteAheadFiles',
     'runCapacityExceededFailure',
+    'runCleanSlateResetWithOpenHandle',
     'runDuplicatePendingOpenRejection',
     'runDeferredWriteUpgrade',
     'runFileLockRegression',
@@ -27,6 +28,7 @@ const browserFixtureNames = [
     'runSnapshotIsolation',
     'runStaleDeferredWriteRejection',
     'runStaleOwnedLeaseSlotPreservation',
+    'runTargetedResetRefusal',
     'runWalRoundTrip',
     'runWorkerConcurrency',
     'runZeroByteWriteAndDiagnostics',
@@ -83,6 +85,23 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
         expect(result.openActiveOwnerLeaseCount).toBe(1);
         expect(result.incompatibleReuseMessage).toContain('already exists with different options');
         expect(result.resetWhileOpenMessage).toBe('Cannot reset MemoryWriteAheadVFS while 3 open handles remain');
+    });
+
+    test('resets and deregisters every runtime even when one still holds an open handle', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runCleanSlateResetWithOpenHandle');
+
+        expect(result.resetError).toBeNull();
+        expect(result.leakingRuntimeRegistered).toBe(false);
+        expect(result.followingRuntimeRegistered).toBe(false);
+        expect(result.followingFileSizeAfterReset).toBe(0);
+    });
+
+    test('refuses a targeted reset with open handles without touching the runtime', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runTargetedResetRefusal');
+
+        expect(result.resetMessage).toBe('Cannot reset MemoryWriteAheadVFS while 1 open handles remain');
+        expect(result.openHandleCountAfterRefusal).toBe(1);
+        expect(result.fileSizeAfterRefusal).toBe(4);
     });
 
     test('reopens committed WAL data from the shared in-memory runtime', async ({ page }) => {

@@ -25,6 +25,7 @@ import {
     MEMORY_WRITE_AHEAD_OWNER_LEASE_SLOT_COUNT,
     MEMORY_WRITE_AHEAD_RUNTIME_META,
     getMemoryWriteAheadFile,
+    getMemoryWriteAheadFileSizeBytes,
     getMemoryWriteAheadLockClockMs,
     getMemoryWriteAheadRuntimeOwnerSlotOffset,
     releaseMemoryWriteAheadRuntimeHandle,
@@ -258,6 +259,70 @@ export const runRuntimeLifecycle = async () => {
         await waitForOpenHandleCount(dbFilename, 0).catch(() => undefined);
         resetRuntime(dbFilename);
         throw error;
+    }
+};
+
+export const runCleanSlateResetWithOpenHandle = () => {
+    ensureCrossOriginIsolated();
+
+    const leakingDbFilename = nextDbFilename('reset-leaking');
+    const followingDbFilename = nextDbFilename('reset-following');
+    const leakingRuntime = createMemoryWriteAheadSharedRuntime(leakingDbFilename);
+    const followingRuntime = createMemoryWriteAheadSharedRuntime(followingDbFilename);
+    const followingFile = getMemoryWriteAheadFile(followingRuntime, followingDbFilename);
+    if (!followingFile) {
+        throw new Error(`Missing MemoryWriteAhead file for ${followingDbFilename}`);
+    }
+
+    retainMemoryWriteAheadRuntimeHandle(leakingRuntime);
+    writeMemoryWriteAheadFile(followingFile, new Uint8Array([1, 2, 3, 4]), 0);
+
+    try {
+        const resetError = (() => {
+            try {
+                MemoryWriteAheadVFS.resetRuntime();
+                return null;
+            } catch (error) {
+                return error instanceof Error ? error.message : String(error);
+            }
+        })();
+
+        return {
+            followingFileSizeAfterReset: getMemoryWriteAheadFileSizeBytes(followingFile),
+            followingRuntimeRegistered: getMemoryWriteAheadRuntimeDiagnostics(followingDbFilename) !== null,
+            leakingRuntimeRegistered: getMemoryWriteAheadRuntimeDiagnostics(leakingDbFilename) !== null,
+            resetError,
+        };
+    } finally {
+        releaseMemoryWriteAheadRuntimeHandle(leakingRuntime);
+        MemoryWriteAheadVFS.resetRuntime();
+    }
+};
+
+export const runTargetedResetRefusal = async () => {
+    ensureCrossOriginIsolated();
+
+    const dbFilename = nextDbFilename('reset-targeted');
+    const runtime = createMemoryWriteAheadSharedRuntime(dbFilename);
+    const file = getMemoryWriteAheadFile(runtime, dbFilename);
+    if (!file) {
+        throw new Error(`Missing MemoryWriteAhead file for ${dbFilename}`);
+    }
+
+    retainMemoryWriteAheadRuntimeHandle(runtime);
+    writeMemoryWriteAheadFile(file, new Uint8Array([1, 2, 3, 4]), 0);
+
+    try {
+        const resetMessage = await captureErrorMessage(() => resetRuntime(dbFilename));
+
+        return {
+            fileSizeAfterRefusal: getMemoryWriteAheadFileSizeBytes(file),
+            openHandleCountAfterRefusal: diagnosticsFor(dbFilename).openHandleCount,
+            resetMessage,
+        };
+    } finally {
+        releaseMemoryWriteAheadRuntimeHandle(runtime);
+        resetRuntime(dbFilename);
     }
 };
 
