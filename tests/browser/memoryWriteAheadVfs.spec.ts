@@ -14,6 +14,7 @@ const browserFixtureNames = [
     'runOwnerLeaseClaimRecovery',
     'runOwnerLeaseExhaustionRecovery',
     'runReadmeQuickstart',
+    'runRejectedGrowableReservation',
     'runRollbackAndPragmaBehavior',
     'runRuntimeLifecycle',
     'runRuntimeOptionValidation',
@@ -59,6 +60,16 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
             'initialDatabaseCapacityBytes cannot exceed maxDatabaseCapacityBytes',
             'maxWriteAheadCapacityBytes cannot exceed 2147483647 bytes',
         ]);
+    });
+
+    test('names the allocator error when a growable SharedArrayBuffer reservation is rejected', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runRejectedGrowableReservation');
+
+        expect(result.message).toBe(
+            'MemoryWriteAheadVFS could not reserve a growable SharedArrayBuffer: Array buffer allocation failed'
+        );
+        expect(result.causeIsAllocatorError).toBe(true);
+        expect(result.runtimeRegistered).toBe(false);
     });
 
     test('tracks lifecycle diagnostics and refuses reset while handles are open', async ({ page }) => {

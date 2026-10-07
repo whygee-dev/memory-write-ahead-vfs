@@ -177,6 +177,38 @@ export const runRuntimeOptionValidation = () => {
     };
 };
 
+export const runRejectedGrowableReservation = () => {
+    ensureCrossOriginIsolated();
+
+    const dbFilename = nextDbFilename('rejected-reservation');
+    const reservationError = new RangeError('Array buffer allocation failed');
+    const NativeSharedArrayBuffer = globalThis.SharedArrayBuffer;
+    globalThis.SharedArrayBuffer = new Proxy(NativeSharedArrayBuffer, {
+        construct(target, [byteLength, options]: [number, { maxByteLength?: number }?]) {
+            if (options?.maxByteLength !== undefined) {
+                throw reservationError;
+            }
+
+            return new target(byteLength);
+        },
+    });
+
+    try {
+        createMemoryWriteAheadSharedRuntime(dbFilename);
+    } catch (error) {
+        return {
+            causeIsAllocatorError: error instanceof Error && error.cause === reservationError,
+            message: error instanceof Error ? error.message : String(error),
+            runtimeRegistered: getMemoryWriteAheadRuntimeDiagnostics(dbFilename) !== null,
+        };
+    } finally {
+        globalThis.SharedArrayBuffer = NativeSharedArrayBuffer;
+    }
+
+    resetRuntime(dbFilename);
+    throw new Error('Expected runtime creation to fail when the growable reservation is rejected');
+};
+
 export const runRuntimeLifecycle = async () => {
     ensureCrossOriginIsolated();
 

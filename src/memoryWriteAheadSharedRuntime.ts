@@ -564,7 +564,7 @@ const ensureLocalRuntimeLease = (
 
 // Without COOP/COEP response headers a browser context is not cross-origin isolated and exposes
 // no SharedArrayBuffer at all; the generic capability error would hide that deployment mistake.
-const createGrowableSharedArrayBufferSupportError = () => {
+const createGrowableSharedArrayBufferSupportError = (reservationError?: unknown) => {
     if (globalThis.crossOriginIsolated === false) {
         const error = new Error(
             'MemoryWriteAheadVFS requires growable SharedArrayBuffer support: this page is not cross-origin isolated. Serve it with the Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp response headers.'
@@ -574,6 +574,15 @@ const createGrowableSharedArrayBufferSupportError = () => {
             error: error.message,
         });
         return error;
+    }
+
+    if (reservationError !== undefined) {
+        return new Error(
+            `MemoryWriteAheadVFS could not reserve a growable SharedArrayBuffer: ${
+                reservationError instanceof Error ? reservationError.message : String(reservationError)
+            }`,
+            { cause: reservationError }
+        );
     }
 
     return new Error('MemoryWriteAheadVFS requires growable SharedArrayBuffer support');
@@ -607,9 +616,9 @@ const createSharedSegmentData = (
                 data: buffer,
             };
         }
-    } catch (_error) {
+    } catch (reservationError) {
         if (!allowFixedCapacityFallback) {
-            throw createGrowableSharedArrayBufferSupportError();
+            throw createGrowableSharedArrayBufferSupportError(reservationError);
         }
     }
 
