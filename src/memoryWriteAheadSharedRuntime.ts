@@ -11,6 +11,8 @@ const LOCK_CLOCK_MODULO_MS = 0x7fffffff;
 const MAX_INT32_ATOMIC_COUNTER = 0x7fffffff;
 export const MEMORY_WRITE_AHEAD_OWNER_LEASE_SLOT_COUNT = 32;
 const MIN_SEGMENT_COUNT = 1;
+const MIN_AMORTIZED_SEGMENT_CAPACITY_BYTES = 64 * KIB;
+const MAX_SEGMENT_GROWTH_STEP_BYTES = MIB;
 
 const memoryWriteAheadRuntimeLogger = noopMemoryWriteAheadLogger;
 
@@ -785,7 +787,12 @@ const growSegment = (segment: MemoryWriteAheadSharedSegment, requiredBytes: numb
     }
 
     if (segment.capacityMode === 'growable') {
-        segment.data.grow(requiredBytes);
+        const currentCapacityBytes = segment.data.byteLength;
+        const amortizedCapacityBytes = Math.min(
+            Math.max(MIN_AMORTIZED_SEGMENT_CAPACITY_BYTES, currentCapacityBytes * 2),
+            currentCapacityBytes + MAX_SEGMENT_GROWTH_STEP_BYTES
+        );
+        segment.data.grow(Math.min(segment.maxCapacityBytes, Math.max(requiredBytes, amortizedCapacityBytes)));
         return true;
     }
 

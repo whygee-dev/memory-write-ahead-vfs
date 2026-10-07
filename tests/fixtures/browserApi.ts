@@ -12,6 +12,7 @@ import {
     recoverTerminatedMemoryWriteAheadRuntimeOwner,
     resolveMemoryWriteAheadRuntimeOptions,
     type MemoryWriteAheadRuntimeOptions,
+    type MemoryWriteAheadSharedFile,
     type MemoryWriteAheadSharedRuntime,
 } from '../../src/index.js';
 import {
@@ -28,6 +29,7 @@ import {
     getMemoryWriteAheadFileSizeBytes,
     getMemoryWriteAheadLockClockMs,
     getMemoryWriteAheadRuntimeOwnerSlotOffset,
+    readMemoryWriteAheadFile,
     releaseMemoryWriteAheadRuntimeHandle,
     retainMemoryWriteAheadRuntimeHandle,
     truncateMemoryWriteAheadFile,
@@ -495,6 +497,111 @@ export const runSegmentReclaimAccountingSaturation = () => {
     } finally {
         resetRuntime(dbFilename);
     }
+};
+
+export const runBoundedSegmentGrowth = () => {
+    ensureCrossOriginIsolated();
+
+    const kib = 1024;
+    const mib = 1024 * kib;
+    const withRuntimeFile = <TResult>(
+        label: string,
+        options: MemoryWriteAheadRuntimeOptions,
+        operation: (file: MemoryWriteAheadSharedFile, runtime: MemoryWriteAheadSharedRuntime) => TResult
+    ) => {
+        const dbFilename = nextDbFilename(label);
+        const runtime = createMemoryWriteAheadSharedRuntime(dbFilename, {
+            initialWriteAheadCapacityBytes: 64 * kib,
+            maxWriteAheadCapacityBytes: 128 * kib,
+            ...options,
+        });
+        const file = getMemoryWriteAheadFile(runtime, dbFilename);
+        if (!file) {
+            throw new Error(`Missing MemoryWriteAhead file for ${dbFilename}`);
+        }
+
+        try {
+            return operation(file, runtime);
+        } finally {
+            resetRuntime(dbFilename);
+        }
+    };
+    const secondSegmentBytes = (file: MemoryWriteAheadSharedFile) => file.segments[1]?.data.byteLength ?? 0;
+
+    const smallAppends = withRuntimeFile(
+        'growth-small-appends',
+        { initialDatabaseCapacityBytes: mib, maxDatabaseCapacityBytes: 2 * mib },
+        (file) => {
+            const pageBytes = new Uint8Array(4096).fill(23);
+            writeMemoryWriteAheadFile(file, pageBytes, mib);
+            const afterFirstAppend = secondSegmentBytes(file);
+            writeMemoryWriteAheadFile(file, pageBytes, mib + pageBytes.byteLength);
+            const pastEnd = new Uint8Array(32).fill(37);
+
+            return {
+                afterFirstAppend,
+                afterSecondAppend: secondSegmentBytes(file),
+                bytesReadPastEnd: readMemoryWriteAheadFile(file, pastEnd, mib + 2 * pageBytes.byteLength),
+                logicalSizeBytes: getMemoryWriteAheadFileSizeBytes(file),
+                pastEndUntouched: pastEnd.every((byte) => byte === 37),
+            };
+        }
+    );
+
+    const largeSegment = withRuntimeFile(
+        'growth-large-segment',
+        { initialDatabaseCapacityBytes: 8 * mib, maxDatabaseCapacityBytes: 16 * mib },
+        (file) => {
+            writeMemoryWriteAheadFile(file, new Uint8Array(3 * mib), 8 * mib);
+            writeMemoryWriteAheadFile(file, new Uint8Array(32), 11 * mib);
+
+            return { secondSegmentBytes: secondSegmentBytes(file) };
+        }
+    );
+
+    const finalPartialSegment = withRuntimeFile(
+        'growth-final-partial-segment',
+        { initialDatabaseCapacityBytes: 64 * kib, maxDatabaseCapacityBytes: 64 * kib + 1000 },
+        (file) => {
+            const payload = new Uint8Array(64 * kib + 1000).fill(23);
+            writeMemoryWriteAheadFile(file, payload, 0);
+            const readback = new Uint8Array(payload.byteLength);
+            const bytesRead = readMemoryWriteAheadFile(file, readback, 0);
+
+            return {
+                bytesRead,
+                readbackMatches: readback.every((byte) => byte === 23),
+                secondSegmentBytes: secondSegmentBytes(file),
+            };
+        }
+    );
+
+    const clonedReader = withRuntimeFile(
+        'growth-cloned-reader',
+        { initialDatabaseCapacityBytes: 64 * kib, maxDatabaseCapacityBytes: 3 * 64 * kib },
+        (file, runtime) => {
+            const readerFile = getMemoryWriteAheadFile(structuredClone(runtime), file.pathname);
+            if (!readerFile) {
+                throw new Error(`Missing cloned MemoryWriteAhead file for ${file.pathname}`);
+            }
+
+            const payload = new Uint8Array(64 * kib + 4096).fill(23);
+            writeMemoryWriteAheadFile(file, payload, 0);
+            const readback = new Uint8Array(payload.byteLength + 1).fill(37);
+            const bytesRead = readMemoryWriteAheadFile(readerFile, readback, 0);
+
+            return {
+                bytesRead,
+                readbackMatches: readback.subarray(0, payload.byteLength).every((byte) => byte === 23),
+                readerLogicalSizeBytes: getMemoryWriteAheadFileSizeBytes(readerFile),
+                readerSecondSegmentBytes: secondSegmentBytes(readerFile),
+                tailUntouched: readback[payload.byteLength] === 37,
+                writerSecondSegmentBytes: secondSegmentBytes(file),
+            };
+        }
+    );
+
+    return { clonedReader, finalPartialSegment, largeSegment, smallAppends };
 };
 
 export const runZeroByteWriteAndDiagnostics = () => {

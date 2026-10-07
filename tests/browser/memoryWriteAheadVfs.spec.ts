@@ -7,6 +7,7 @@ const browserFixtureNames = [
     'runAttachedDatabaseAtomicTransaction',
     'runAttachedDatabaseConcurrentWrites',
     'runAttachedDatabaseWithoutWriteAheadFiles',
+    'runBoundedSegmentGrowth',
     'runCapacityExceededFailure',
     'runCleanSlateResetWithOpenHandle',
     'runDuplicatePendingOpenRejection',
@@ -141,6 +142,28 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
 
         expect(result.reclaimedBytes).toBe(0x7fffffff);
         expect(result.reclaimedSegmentCount).toBe(0x7fffffff);
+    });
+
+    test('grows segments in bounded steps and keeps grown bytes visible to cloned runtimes', async ({ page }) => {
+        const { clonedReader, finalPartialSegment, largeSegment, smallAppends } = await runBrowserFixture(
+            page,
+            'runBoundedSegmentGrowth'
+        );
+
+        expect(smallAppends.afterFirstAppend).toBe(64 * 1024);
+        expect(smallAppends.afterSecondAppend).toBe(64 * 1024);
+        expect(smallAppends.logicalSizeBytes).toBe(1024 * 1024 + 2 * 4096);
+        expect(smallAppends.bytesReadPastEnd).toBe(0);
+        expect(smallAppends.pastEndUntouched).toBe(true);
+        expect(largeSegment.secondSegmentBytes).toBe(4 * 1024 * 1024);
+        expect(finalPartialSegment.secondSegmentBytes).toBe(1000);
+        expect(finalPartialSegment.bytesRead).toBe(64 * 1024 + 1000);
+        expect(finalPartialSegment.readbackMatches).toBe(true);
+        expect(clonedReader.bytesRead).toBe(64 * 1024 + 4096);
+        expect(clonedReader.readbackMatches).toBe(true);
+        expect(clonedReader.tailUntouched).toBe(true);
+        expect(clonedReader.readerLogicalSizeBytes).toBe(64 * 1024 + 4096);
+        expect(clonedReader.readerSecondSegmentBytes).toBe(clonedReader.writerSecondSegmentBytes);
     });
 
     test('extends logical size for zero-byte writes and records high-water diagnostics', async ({ page }) => {
