@@ -26,6 +26,7 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/prepare-dist.mjs",
+    "build:wasm": "docker build --output wasm/dist wasm && cd wasm/dist && sha256sum -c ../SHA256SUMS",
     "benchmark": "playwright test --config playwright.benchmark.config.ts",
     "benchmark:publish-result": "node scripts/publish-benchmark-result.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
