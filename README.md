@@ -178,7 +178,7 @@ Copy both files into your app and import the rebuilt `wa-sqlite.mjs` in place of
 
 The recipe pins the inputs that decide the output bytes: the `emscripten/emsdk:4.0.9` image by digest, [powersync-ja/wa-sqlite](https://github.com/powersync-ja/wa-sqlite) at `e4bb5532c8`, the commit published as `@journeyapps/wa-sqlite` 1.7.0 (SQLite 3.53.0, PowerSync core v0.4.13), and the SHA-256 of the downloaded PowerSync core library and of the generated SQLite amalgamation. It builds only the synchronous `wa-sqlite` variant this VFS uses, with the upstream flags (`-Oz -flto`, `WASM_BIGINT=0`); the attach limit is the only configuration change. Two builds with `--no-cache` on the same host produced byte-identical files; other hosts were not tried.
 
-The npm artifact is not the same build with one flag changed: its compile options report clang 23, while the recipe uses Emscripten 4.0.9 (clang 21), the version the fork's CI pins.
+The npm artifact is not the same build with one flag changed: its compile options report clang 23, while the recipe uses Emscripten 4.0.9 (clang 21), the version the fork's CI pins. Rebuild for the attach limit, not for speed: in [the comparison benchmark](https://github.com/whygee-dev/memory-write-ahead-vfs/blob/main/benchmarks/wasm-build-comparison/README.md), the rebuilt build ran within 5% of the npm build on every SQL workload, slightly slower on each.
 
 ## Capacity options
 
