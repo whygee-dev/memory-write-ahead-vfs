@@ -24,7 +24,7 @@ This library targets the gap between those options: an ephemeral SQLite database
 
 A plain `SharedArrayBuffer` is fixed-size at construction, which forces a bad choice for a database with a large ceiling: either commit the maximum capacity up front (hundreds of MiB for a mostly-small database), or re-allocate bigger buffers as data grows and re-broadcast the new handles to every worker mid-flight, copying bytes and re-coordinating every open connection.
 
-`SharedArrayBuffer.prototype.grow` removes that dilemma. Buffers start at the initial capacity and grow in place up to `maxByteLength`, and every worker that already holds the runtime observes the new length immediately — no re-sharing, no copies. Files are split into segments so each buffer's reservation stays bounded, and write-ahead segments past the logical end drop out of the active set after `PRAGMA wal_checkpoint(TRUNCATE)` (tracked in diagnostics; the underlying allocation is not returned to the OS, since shared buffers cannot shrink).
+`SharedArrayBuffer.prototype.grow` removes that dilemma. Buffers start at the initial capacity and grow in place up to `maxByteLength`, and every worker that already holds the runtime observes the new length immediately — no re-sharing, no copies. Each growth doubles the buffer, starting at 64 KiB and adding at most 1 MiB per step (or exactly what a larger write needs), so a run of page-sized appends does not resize a buffer on every write. Files are split into segments so each buffer's reservation stays bounded, and write-ahead segments past the logical end drop out of the active set after `PRAGMA wal_checkpoint(TRUNCATE)` (tracked in diagnostics; the underlying allocation is not returned to the OS, since shared buffers cannot shrink).
 
 On engines without growable `SharedArrayBuffer`, `allowFixedCapacityFallback: true` restores the fixed-size strategy at the cost of allocating each file's max capacity immediately.
 
@@ -134,7 +134,7 @@ When an application deliberately terminates a worker, it can recover that worker
 
 ## Attached databases
 
-Register each attached database in the shared runtime before executing `ATTACH DATABASE`. While the owning context remains live, atomic transactions spanning the primary and attached databases are coordinated through SQLite's super-journal path. Transactions opened directly on an attached database are serialized across connections because attached databases use SQLite's rollback-journal protocol rather than the primary database's write-ahead path.
+Register each attached database in the shared runtime before executing `ATTACH DATABASE`. While the owning context remains live, atomic transactions spanning the primary and attached databases are coordinated through SQLite's super-journal path. Transactions opened directly on an attached database are serialized across connections because attached databases use SQLite's rollback-journal protocol rather than the primary database's write-ahead path. For the same reason an attached database reserves only its database file: `ensureMemoryWriteAheadDatabaseFiles` returns an empty `writeAhead` list for any filename other than the runtime's primary database.
 
 ```ts
 import { ensureMemoryWriteAheadDatabaseFiles } from 'memory-write-ahead-vfs';
@@ -149,7 +149,7 @@ import { ensureMemoryWriteAheadDatabaseFiles, registerMemoryWriteAheadSharedFile
 
 // Worker that first opens the attached database:
 const attachedFiles = ensureMemoryWriteAheadDatabaseFiles(workerRuntime, '/analytics.sqlite');
-postMessage({ files: [attachedFiles.database, ...attachedFiles.writeAhead] });
+postMessage({ files: [attachedFiles.database] });
 
 // Runtime-owning parent after receiving that structured clone:
 registerMemoryWriteAheadSharedFiles({

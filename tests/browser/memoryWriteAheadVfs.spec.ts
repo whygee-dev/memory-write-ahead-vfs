@@ -6,7 +6,10 @@ const browserFixtureNames = [
     'runAbandonedWorkerLeaseRecovery',
     'runAttachedDatabaseAtomicTransaction',
     'runAttachedDatabaseConcurrentWrites',
+    'runAttachedDatabaseWithoutWriteAheadFiles',
+    'runBoundedSegmentGrowth',
     'runCapacityExceededFailure',
+    'runCleanSlateResetWithOpenHandle',
     'runDuplicatePendingOpenRejection',
     'runDeferredWriteUpgrade',
     'runFileLockRegression',
@@ -14,6 +17,7 @@ const browserFixtureNames = [
     'runOwnerLeaseClaimRecovery',
     'runOwnerLeaseExhaustionRecovery',
     'runReadmeQuickstart',
+    'runRejectedGrowableReservation',
     'runRollbackAndPragmaBehavior',
     'runRuntimeLifecycle',
     'runRuntimeOptionValidation',
@@ -25,6 +29,7 @@ const browserFixtureNames = [
     'runSnapshotIsolation',
     'runStaleDeferredWriteRejection',
     'runStaleOwnedLeaseSlotPreservation',
+    'runTargetedResetRefusal',
     'runWalRoundTrip',
     'runWorkerConcurrency',
     'runZeroByteWriteAndDiagnostics',
@@ -61,6 +66,16 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
         ]);
     });
 
+    test('names the allocator error when a growable SharedArrayBuffer reservation is rejected', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runRejectedGrowableReservation');
+
+        expect(result.message).toBe(
+            'MemoryWriteAheadVFS could not reserve a growable SharedArrayBuffer: Array buffer allocation failed'
+        );
+        expect(result.causeIsAllocatorError).toBe(true);
+        expect(result.runtimeRegistered).toBe(false);
+    });
+
     test('tracks lifecycle diagnostics and refuses reset while handles are open', async ({ page }) => {
         const result = await runBrowserFixture(page, 'runRuntimeLifecycle');
 
@@ -71,6 +86,23 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
         expect(result.openActiveOwnerLeaseCount).toBe(1);
         expect(result.incompatibleReuseMessage).toContain('already exists with different options');
         expect(result.resetWhileOpenMessage).toBe('Cannot reset MemoryWriteAheadVFS while 3 open handles remain');
+    });
+
+    test('resets and deregisters every runtime even when one still holds an open handle', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runCleanSlateResetWithOpenHandle');
+
+        expect(result.resetError).toBeNull();
+        expect(result.leakingRuntimeRegistered).toBe(false);
+        expect(result.followingRuntimeRegistered).toBe(false);
+        expect(result.followingFileSizeAfterReset).toBe(0);
+    });
+
+    test('refuses a targeted reset with open handles without touching the runtime', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runTargetedResetRefusal');
+
+        expect(result.resetMessage).toBe('Cannot reset MemoryWriteAheadVFS while 1 open handles remain');
+        expect(result.openHandleCountAfterRefusal).toBe(1);
+        expect(result.fileSizeAfterRefusal).toBe(4);
     });
 
     test('reopens committed WAL data from the shared in-memory runtime', async ({ page }) => {
@@ -110,6 +142,28 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
 
         expect(result.reclaimedBytes).toBe(0x7fffffff);
         expect(result.reclaimedSegmentCount).toBe(0x7fffffff);
+    });
+
+    test('grows segments in bounded steps and keeps grown bytes visible to cloned runtimes', async ({ page }) => {
+        const { clonedReader, finalPartialSegment, largeSegment, smallAppends } = await runBrowserFixture(
+            page,
+            'runBoundedSegmentGrowth'
+        );
+
+        expect(smallAppends.afterFirstAppend).toBe(64 * 1024);
+        expect(smallAppends.afterSecondAppend).toBe(64 * 1024);
+        expect(smallAppends.logicalSizeBytes).toBe(1024 * 1024 + 2 * 4096);
+        expect(smallAppends.bytesReadPastEnd).toBe(0);
+        expect(smallAppends.pastEndUntouched).toBe(true);
+        expect(largeSegment.secondSegmentBytes).toBe(4 * 1024 * 1024);
+        expect(finalPartialSegment.secondSegmentBytes).toBe(1000);
+        expect(finalPartialSegment.bytesRead).toBe(64 * 1024 + 1000);
+        expect(finalPartialSegment.readbackMatches).toBe(true);
+        expect(clonedReader.bytesRead).toBe(64 * 1024 + 4096);
+        expect(clonedReader.readbackMatches).toBe(true);
+        expect(clonedReader.tailUntouched).toBe(true);
+        expect(clonedReader.readerLogicalSizeBytes).toBe(64 * 1024 + 4096);
+        expect(clonedReader.readerSecondSegmentBytes).toBe(clonedReader.writerSecondSegmentBytes);
     });
 
     test('extends logical size for zero-byte writes and records high-water diagnostics', async ({ page }) => {
@@ -160,7 +214,16 @@ test.describe('MemoryWriteAheadVFS browser integration', () => {
 
         expect(result.mainRows).toEqual(['main']);
         expect(result.attachedRows).toEqual(['attached']);
-        expect(result.fileCount).toBe(6);
+        expect(result.fileCount).toBe(4);
+    });
+
+    test('reserves no write-ahead files for an attached database', async ({ page }) => {
+        const result = await runBrowserFixture(page, 'runAttachedDatabaseWithoutWriteAheadFiles');
+
+        expect(result.primaryWriteAheadFileCount).toBe(2);
+        expect(result.attachedWriteAheadFileCount).toBe(0);
+        expect(result.pathnames).toEqual(['main', 'main-wa0', 'main-wa1', 'attached']);
+        expect(result.attachedRows).toEqual(['attached']);
     });
 
     test('serializes concurrent transactions opened directly on an attached shared database', async ({ page }) => {

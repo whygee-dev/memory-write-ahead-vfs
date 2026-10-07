@@ -11,6 +11,8 @@ const LOCK_CLOCK_MODULO_MS = 0x7fffffff;
 const MAX_INT32_ATOMIC_COUNTER = 0x7fffffff;
 export const MEMORY_WRITE_AHEAD_OWNER_LEASE_SLOT_COUNT = 32;
 const MIN_SEGMENT_COUNT = 1;
+const MIN_AMORTIZED_SEGMENT_CAPACITY_BYTES = 64 * KIB;
+const MAX_SEGMENT_GROWTH_STEP_BYTES = MIB;
 
 const memoryWriteAheadRuntimeLogger = noopMemoryWriteAheadLogger;
 
@@ -122,7 +124,7 @@ export type MemoryWriteAheadSharedRuntime = {
 
 export type MemoryWriteAheadDatabaseFiles = {
     database: MemoryWriteAheadSharedFile;
-    writeAhead: [MemoryWriteAheadSharedFile, MemoryWriteAheadSharedFile];
+    writeAhead: MemoryWriteAheadSharedFile[];
 };
 
 export type MemoryWriteAheadSharedFilesRegistration = {
@@ -564,7 +566,7 @@ const ensureLocalRuntimeLease = (
 
 // Without COOP/COEP response headers a browser context is not cross-origin isolated and exposes
 // no SharedArrayBuffer at all; the generic capability error would hide that deployment mistake.
-const createGrowableSharedArrayBufferSupportError = () => {
+const createGrowableSharedArrayBufferSupportError = (reservationError?: unknown) => {
     if (globalThis.crossOriginIsolated === false) {
         const error = new Error(
             'MemoryWriteAheadVFS requires growable SharedArrayBuffer support: this page is not cross-origin isolated. Serve it with the Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp response headers.'
@@ -574,6 +576,15 @@ const createGrowableSharedArrayBufferSupportError = () => {
             error: error.message,
         });
         return error;
+    }
+
+    if (reservationError !== undefined) {
+        return new Error(
+            `MemoryWriteAheadVFS could not reserve a growable SharedArrayBuffer: ${
+                reservationError instanceof Error ? reservationError.message : String(reservationError)
+            }`,
+            { cause: reservationError }
+        );
     }
 
     return new Error('MemoryWriteAheadVFS requires growable SharedArrayBuffer support');
@@ -607,9 +618,9 @@ const createSharedSegmentData = (
                 data: buffer,
             };
         }
-    } catch (_error) {
+    } catch (reservationError) {
         if (!allowFixedCapacityFallback) {
-            throw createGrowableSharedArrayBufferSupportError();
+            throw createGrowableSharedArrayBufferSupportError(reservationError);
         }
     }
 
@@ -776,7 +787,12 @@ const growSegment = (segment: MemoryWriteAheadSharedSegment, requiredBytes: numb
     }
 
     if (segment.capacityMode === 'growable') {
-        segment.data.grow(requiredBytes);
+        const currentCapacityBytes = segment.data.byteLength;
+        const amortizedCapacityBytes = Math.min(
+            Math.max(MIN_AMORTIZED_SEGMENT_CAPACITY_BYTES, currentCapacityBytes * 2),
+            currentCapacityBytes + MAX_SEGMENT_GROWTH_STEP_BYTES
+        );
+        segment.data.grow(Math.min(segment.maxCapacityBytes, Math.max(requiredBytes, amortizedCapacityBytes)));
         return true;
     }
 
@@ -927,14 +943,21 @@ export const ensureMemoryWriteAheadDatabaseFiles = (
     dbFilename: string
 ): MemoryWriteAheadDatabaseFiles => {
     const normalizedDbFilename = normalizeMemoryWriteAheadPathname(dbFilename);
+    const database = ensureSharedFile(
+        runtime,
+        normalizedDbFilename,
+        runtime.capacities.initialDatabaseCapacityBytes,
+        runtime.capacities.maxDatabaseCapacityBytes
+    );
+
+    // Only the runtime's primary database is opened with a WriteAhead. Attached databases use SQLite's rollback
+    // journal, so a -wa0/-wa1 pair for them would only consume growable SharedArrayBuffer reservation.
+    if (normalizedDbFilename !== runtime.dbFilename) {
+        return { database, writeAhead: [] };
+    }
 
     return {
-        database: ensureSharedFile(
-            runtime,
-            normalizedDbFilename,
-            runtime.capacities.initialDatabaseCapacityBytes,
-            runtime.capacities.maxDatabaseCapacityBytes
-        ),
+        database,
         writeAhead: [
             ensureSharedFile(
                 runtime,
@@ -1095,13 +1118,7 @@ export const recoverTerminatedMemoryWriteAheadRuntimeOwner = (
 };
 
 const resetMemoryWriteAheadRuntimeState = (runtime: MemoryWriteAheadSharedRuntime) => {
-    recoverAbandonedRuntimeOwnerLeases(runtime);
     const runtimeMeta = getRuntimeMeta(runtime);
-    const openHandleCount = getOpenHandleCount(runtime);
-
-    if (openHandleCount > 0) {
-        throw new Error(`Cannot reset MemoryWriteAheadVFS while ${openHandleCount} open handles remain`);
-    }
 
     Object.values(runtime.files).forEach((file) => {
         const meta = getFileMeta(file);
@@ -1127,7 +1144,8 @@ const resetMemoryWriteAheadRuntimeState = (runtime: MemoryWriteAheadSharedRuntim
 };
 
 // With a dbFilename, resets only that runtime so concurrent clients (e.g. other databases) keep their
-// runtimes; without one, resets every registered runtime (used by test teardown for a clean slate).
+// runtimes, and refuses while that runtime has open handles. Without one, resets and deregisters every
+// registered runtime even when handles were never released (used by test teardown for a clean slate).
 export const resetMemoryWriteAheadSharedRuntime = (dbFilename?: string) => {
     const registry = getRuntimeRegistry();
 
@@ -1136,6 +1154,12 @@ export const resetMemoryWriteAheadSharedRuntime = (dbFilename?: string) => {
         const runtime = registry.get(normalizedDbFilename);
         if (!runtime) {
             return;
+        }
+
+        recoverAbandonedRuntimeOwnerLeases(runtime);
+        const openHandleCount = getOpenHandleCount(runtime);
+        if (openHandleCount > 0) {
+            throw new Error(`Cannot reset MemoryWriteAheadVFS while ${openHandleCount} open handles remain`);
         }
 
         resetMemoryWriteAheadRuntimeState(runtime);
