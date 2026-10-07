@@ -160,6 +160,26 @@ registerMemoryWriteAheadSharedFiles({
 
 Structured cloning shares the underlying `SharedArrayBuffer`s; it does not copy the database bytes.
 
+## Raising the attached-database limit
+
+The `wa-sqlite.wasm` published in `@journeyapps/wa-sqlite` 1.7.0 keeps SQLite's default `SQLITE_MAX_ATTACHED=10`, so one connection can attach at most 10 databases. [`wasm/Dockerfile`](https://github.com/whygee-dev/memory-write-ahead-vfs/blob/main/wasm/Dockerfile) rebuilds the same wa-sqlite source with a higher limit, 125 by default, which is SQLite's ceiling:
+
+```bash
+pnpm build:wasm
+```
+
+This writes `wasm/dist/wa-sqlite.mjs` and `wasm/dist/wa-sqlite.wasm`, then checks both against [`wasm/SHA256SUMS`](https://github.com/whygee-dev/memory-write-ahead-vfs/blob/main/wasm/SHA256SUMS). For another limit, run Docker directly; the hash check only applies to the default:
+
+```bash
+docker build --build-arg SQLITE_MAX_ATTACHED=32 --output wasm/dist wasm
+```
+
+Copy both files into your app and import the rebuilt `wa-sqlite.mjs` in place of `@journeyapps/wa-sqlite/dist/wa-sqlite.mjs`. Keep `@journeyapps/wa-sqlite` installed for `SQLite.Factory` and the VFS base classes. The glue loads `wa-sqlite.wasm` from its own directory unless you pass `locateFile` or `wasmBinary` to the factory.
+
+The recipe pins the inputs that decide the output bytes: the `emscripten/emsdk:4.0.9` image by digest, [powersync-ja/wa-sqlite](https://github.com/powersync-ja/wa-sqlite) at `e4bb5532c8`, the commit published as `@journeyapps/wa-sqlite` 1.7.0 (SQLite 3.53.0, PowerSync core v0.4.13), and the SHA-256 of the downloaded PowerSync core library and of the generated SQLite amalgamation. It builds only the synchronous `wa-sqlite` variant this VFS uses, with the upstream flags (`-Oz -flto`, `WASM_BIGINT=0`); the attach limit is the only configuration change. Two builds with `--no-cache` on the same host produced byte-identical files; other hosts were not tried.
+
+The npm artifact is not the same build with one flag changed: its compile options report clang 23, while the recipe uses Emscripten 4.0.9 (clang 21), the version the fork's CI pins. Rebuild for the attach limit, not for speed: in [the comparison benchmark](https://github.com/whygee-dev/memory-write-ahead-vfs/blob/main/benchmarks/wasm-build-comparison/README.md), the rebuilt build ran within 5% of the npm build on every SQL workload, slightly slower on each.
+
 ## Capacity options
 
 ```ts
